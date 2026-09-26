@@ -103,6 +103,7 @@ export interface ExpenseItemDefinition {
   defaultFrequency: number;
   isOneTime?: boolean;
   targetYear?: number | null; // The specific year a one-time expense occurs (in today's dollars)
+  applicableStates?: string[]; // ['ALL'] (default) or specific state codes (e.g. ['FL'], ['MD'])
 }
 
 export interface ExpenseCatalog {
@@ -112,6 +113,7 @@ export interface ExpenseCatalog {
 
 export interface DetailedExpensesState {
   catalog: ExpenseCatalog;
+  states?: string[]; // Configured state roster (e.g. ['MD', 'FL'])
   costs: {
     [stateCode: string]: Record<string, number>;
   };
@@ -190,6 +192,7 @@ export const DEFAULT_DETAILED_EXPENSES_STATE: DetailedExpensesState = {
     categories: [...DEFAULT_EXPENSE_CATEGORIES],
     items: []
   },
+  states: ['MD', 'FL'],
   costs: {
     MD: {},
     FL: {}
@@ -217,19 +220,36 @@ export function normalizeDetailedExpenses(raw?: unknown): DetailedExpensesState 
     if (rawObj.MD && !costs.MD) costs.MD = { ...(rawObj.MD as Record<string, number>) };
     if (rawObj.FL && !costs.FL) costs.FL = { ...(rawObj.FL as Record<string, number>) };
     
-    // Ensure both MD and FL objects exist
+    // Ensure default MD and FL objects exist
     if (!costs.MD) costs.MD = {};
     if (!costs.FL) costs.FL = {};
+
+    const rawStates = Array.isArray(rawObj.states) && rawObj.states.length > 0 
+      ? (rawObj.states as string[]) 
+      : ['MD', 'FL'];
+    const stateSet = new Set<string>(rawStates);
+    Object.keys(costs).forEach(s => stateSet.add(s));
 
     const frequencies: Record<string, number> = {
       ...((rawObj.frequencies as Record<string, number>) || {})
     };
 
+    const normalizedItems: ExpenseItemDefinition[] = rawCatalog.items.map((item) => {
+      const applicableStates = Array.isArray(item.applicableStates) && item.applicableStates.length > 0
+        ? [...item.applicableStates]
+        : ['ALL'];
+      return {
+        ...item,
+        applicableStates
+      };
+    });
+
     return {
       catalog: {
         categories: rawCatalog.categories.length > 0 ? [...rawCatalog.categories] : [...DEFAULT_EXPENSE_CATEGORIES],
-        items: [...rawCatalog.items]
+        items: normalizedItems
       },
+      states: Array.from(stateSet),
       costs,
       frequencies,
       MD: costs.MD,
@@ -265,7 +285,8 @@ export function normalizeDetailedExpenses(raw?: unknown): DetailedExpensesState 
       name: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
       category: isOneTime ? 'One-Time Setup Costs' : 'Living',
       defaultFrequency: legacyFreqs[key] ?? 12,
-      isOneTime
+      isOneTime,
+      applicableStates: ['ALL']
     };
   });
 
@@ -283,6 +304,7 @@ export function normalizeDetailedExpenses(raw?: unknown): DetailedExpensesState 
       categories: [...DEFAULT_EXPENSE_CATEGORIES],
       items: legacyItems
     },
+    states: ['MD', 'FL'],
     costs,
     frequencies,
     MD: costs.MD,

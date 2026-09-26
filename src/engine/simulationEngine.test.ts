@@ -2004,6 +2004,73 @@ describe('runRetirementSimulation fixes', () => {
       // In 2029 (FL), baseline = 4000 * 12 = 48000, pool = 35000 (from FL cost table)
       expect(row2029?.livingExpenses).toBeCloseTo(48000 + 35000, 1);
     });
+
+    it('should correctly include and exclude line items based on applicableStates across relocation', () => {
+      const inputs = getMockInputs();
+      inputs.growthAssumptions.cpiInflationRate = 0; // Flat inflation for predictable math
+      inputs.jurisdiction.currentState = 'MD';
+      inputs.jurisdiction.targetState = 'FL';
+      inputs.jurisdiction.relocationYear = 2028;
+      inputs.useDetailedExpenses = true;
+      inputs.detailedExpenses = {
+        catalog: {
+          categories: ['Living', 'Housing'],
+          items: [
+            {
+              id: 'gas',
+              name: 'Auto Gas',
+              category: 'Living',
+              defaultFrequency: 12,
+              applicableStates: ['ALL'],
+            },
+            {
+              id: 'snowPlow',
+              name: 'Snow Plowing',
+              category: 'Housing',
+              defaultFrequency: 12,
+              applicableStates: ['MD'],
+            },
+            {
+              id: 'termite',
+              name: 'Termite Bond',
+              category: 'Housing',
+              defaultFrequency: 12,
+              applicableStates: ['FL'],
+            },
+          ],
+        },
+        costs: {
+          MD: {
+            gas: 200,
+            snowPlow: 100,
+            termite: 0,
+          },
+          FL: {
+            gas: 200,
+            snowPlow: 0,
+            termite: 80,
+          },
+        },
+        frequencies: {
+          gas: 12,
+          snowPlow: 12,
+          termite: 12,
+        },
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find((r) => r.year === 2026);
+      const row2028 = ledger.find((r) => r.year === 2028);
+
+      expect(row2026).toBeDefined();
+      expect(row2028).toBeDefined();
+
+      // 2026 in MD: Auto Gas ($200*12 = 2400) + Snow Plowing ($100*12 = 1200) = $3,600 (Termite excluded)
+      expect(row2026?.livingExpenses).toBe(3600);
+
+      // 2028 in FL: Auto Gas ($200*12 = 2400) + Termite ($80*12 = 960) = $3,360 (Snow Plowing excluded)
+      expect(row2028?.livingExpenses).toBe(3360);
+    });
   });
 });
 

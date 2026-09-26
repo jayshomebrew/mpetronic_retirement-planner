@@ -676,14 +676,16 @@ export function runRetirementSimulation(
       const items = de.catalog?.items ?? [];
       let detailedSum = 0;
       const stateCosts = de.costs?.[activeState];
+      const allCosts = de.costs?.['ALL'];
+      const defaultStateCosts = de.costs?.[inputs.jurisdiction.currentState];
       const freqs = de.frequencies || {};
-      if (stateCosts) {
-        for (const item of items) {
-          if (item.isOneTime) continue;
-          const cost = stateCosts[item.id] ?? 0;
-          const freq = freqs[item.id] ?? item.defaultFrequency ?? 12;
-          detailedSum += cost * freq;
-        }
+      for (const item of items) {
+        if (item.isOneTime) continue;
+        const applies = !item.applicableStates || item.applicableStates.includes('ALL') || item.applicableStates.includes(activeState);
+        if (!applies) continue;
+        const cost = stateCosts?.[item.id] ?? allCosts?.[item.id] ?? defaultStateCosts?.[item.id] ?? 0;
+        const freq = freqs[item.id] ?? item.defaultFrequency ?? 12;
+        detailedSum += cost * freq;
       }
       baseLivingExpensesAnnual = detailedSum;
     }
@@ -881,14 +883,17 @@ export function runRetirementSimulation(
       const activeStateInYear = (inputs.jurisdiction.relocationYear !== null && year >= inputs.jurisdiction.relocationYear)
         ? inputs.jurisdiction.targetState
         : inputs.jurisdiction.currentState;
-      const stateCosts = de.costs?.[activeStateInYear] || de.costs?.[inputs.jurisdiction.currentState];
+      const stateCosts = de.costs?.[activeStateInYear];
+      const allCosts = de.costs?.['ALL'];
+      const defaultStateCosts = de.costs?.[inputs.jurisdiction.currentState];
 
-      if (stateCosts) {
-        for (const item of oneTimeItems) {
-          const itemYear = item.targetYear ?? simStartYear;
-          if (itemYear === year) {
-            oneTimeCosts += stateCosts[item.id] ?? 0;
-          }
+      for (const item of oneTimeItems) {
+        const applies = !item.applicableStates || item.applicableStates.includes('ALL') || item.applicableStates.includes(activeStateInYear);
+        if (!applies) continue;
+        const itemYear = item.targetYear ?? simStartYear;
+        if (itemYear === year) {
+          const cost = stateCosts?.[item.id] ?? allCosts?.[item.id] ?? defaultStateCosts?.[item.id] ?? 0;
+          oneTimeCosts += cost;
         }
       }
     }

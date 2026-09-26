@@ -14,7 +14,11 @@ import {
   FolderPlus,
   ArrowRightLeft,
   Search,
-  Sparkles
+  MapPin,
+  Globe,
+  Filter,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 import {
   DetailedExpensesState,
@@ -52,6 +56,17 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
     return norm.catalog;
   });
 
+  const [statesList, setStatesList] = useState<string[]>(() => {
+    const norm = normalizeDetailedExpenses(detailedExpenses);
+    const initial = norm.states && norm.states.length > 0 ? [...norm.states] : [currentState || 'MD', targetState || 'FL'];
+    const set = new Set<string>(initial);
+    if (currentState) set.add(currentState);
+    if (targetState) set.add(targetState);
+    return Array.from(set);
+  });
+
+  const [activeState, setActiveState] = useState<string>(() => currentState || 'MD');
+
   const [costs, setCosts] = useState<{ [stateCode: string]: Record<string, number> }>(() => {
     const norm = normalizeDetailedExpenses(detailedExpenses);
     return norm.costs;
@@ -67,16 +82,24 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
     if (isOpen) {
       const norm = normalizeDetailedExpenses(detailedExpenses);
       setCatalog(norm.catalog);
+      const sList = norm.states && norm.states.length > 0 ? [...norm.states] : [currentState || 'MD', targetState || 'FL'];
+      const set = new Set<string>(sList);
+      if (currentState) set.add(currentState);
+      if (targetState) set.add(targetState);
+      const finalStates = Array.from(set);
+      setStatesList(finalStates);
+      setActiveState(currentState || finalStates[0] || 'MD');
       setCosts(norm.costs);
       setFrequencies(norm.frequencies);
       setActiveTab('expenses');
     }
-  }, [isOpen, detailedExpenses]);
+  }, [isOpen, detailedExpenses, currentState, targetState]);
 
-  // Modals & UI helpers within dialog
+  // Search and Category filters within dialog
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('ALL');
-  
+  const [showAllStatesItems, setShowAllStatesItems] = useState(false);
+
   // Item Add/Edit modal state
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ExpenseItemDefinition | null>(null);
@@ -87,6 +110,10 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const [itemFrequency, setItemFrequency] = useState<number>(12);
   const [itemIsOneTime, setItemIsOneTime] = useState<boolean>(false);
   const [itemTargetYear, setItemTargetYear] = useState<number | string>(simStartYear);
+  const [itemScopeMode, setItemScopeMode] = useState<'ALL' | 'SPECIFIC'>('ALL');
+  const [itemSelectedStates, setItemSelectedStates] = useState<string[]>([currentState || 'MD']);
+  const [itemBaseCost, setItemBaseCost] = useState<number>(0);
+  const [itemCostsByState, setItemCostsByState] = useState<Record<string, number>>({});
   const [itemError, setItemError] = useState<string | null>(null);
 
   // Category Add/Rename state
@@ -99,8 +126,15 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const [deleteCategoryTarget, setDeleteCategoryTarget] = useState<string | null>(null);
   const [reassignCategoryTarget, setReassignCategoryTarget] = useState<string>('');
 
-  const stateA = currentState || 'MD';
-  const stateB = targetState || 'FL';
+  // Add State Modal state
+  const [addStateModalOpen, setAddStateModalOpen] = useState(false);
+  const [newStateCode, setNewStateCode] = useState('');
+  const [addStateError, setAddStateError] = useState<string | null>(null);
+
+  // Copy State Costs Modal state
+  const [copyCostsModalOpen, setCopyCostsModalOpen] = useState(false);
+  const [copySourceState, setCopySourceState] = useState(currentState || 'MD');
+  const [copyTargetState, setCopyTargetState] = useState(targetState || 'FL');
 
   // Helper currency formatter
   const formatCurrency = (val: number) => {
@@ -121,13 +155,14 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
 
   // Cost and frequency handlers
   const handleCostChange = (stateCode: string, itemId: string, value: number) => {
-    setCosts((prev) => ({
-      ...prev,
-      [stateCode]: {
-        ...(prev[stateCode] || {}),
-        [itemId]: Math.max(0, value)
-      }
-    }));
+    const cleanVal = Math.max(0, value);
+    setCosts((prev) => {
+      const stateObj = { ...(prev[stateCode] || {}), [itemId]: cleanVal };
+      return {
+        ...prev,
+        [stateCode]: stateObj
+      };
+    });
   };
 
   const handleFrequencyChange = (itemId: string, freq: number) => {
@@ -138,12 +173,38 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   };
 
   // Copy state costs
-  const handleCopyStateCosts = (fromState: string, toState: string) => {
-    const sourceCosts = costs[fromState] || {};
+  const handleExecuteCopyStateCosts = () => {
+    if (!copySourceState || !copyTargetState || copySourceState === copyTargetState) return;
+    const sourceCosts = costs[copySourceState] || {};
     setCosts((prev) => ({
       ...prev,
-      [toState]: { ...sourceCosts }
+      [copyTargetState]: { ...sourceCosts }
     }));
+    setCopyCostsModalOpen(false);
+  };
+
+  // Add New State to Roster
+  const handleAddState = () => {
+    const trimmed = newStateCode.trim().toUpperCase();
+    if (!trimmed || trimmed.length !== 2) {
+      setAddStateError('Please enter a valid 2-letter state code (e.g. NC, TX, PA).');
+      return;
+    }
+    if (statesList.includes(trimmed)) {
+      setAddStateError(`State ${trimmed} is already configured.`);
+      return;
+    }
+
+    const nextStates = [...statesList, trimmed];
+    setStatesList(nextStates);
+    setCosts((prev) => ({
+      ...prev,
+      [trimmed]: { ...(prev[trimmed] || {}) }
+    }));
+    setActiveState(trimmed);
+    setNewStateCode('');
+    setAddStateModalOpen(false);
+    setAddStateError(null);
   };
 
   // Item Add/Edit open
@@ -157,6 +218,24 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       setItemFrequency(frequencies[item.id] ?? item.defaultFrequency ?? 12);
       setItemIsOneTime(!!item.isOneTime);
       setItemTargetYear(item.targetYear ?? simStartYear);
+      
+      const appStates = item.applicableStates || ['ALL'];
+      if (appStates.includes('ALL')) {
+        setItemScopeMode('ALL');
+        setItemSelectedStates(statesList.length > 0 ? [...statesList] : [activeState]);
+      } else {
+        setItemScopeMode('SPECIFIC');
+        setItemSelectedStates([...appStates]);
+      }
+
+      const activeCost = costs[activeState]?.[item.id] ?? costs['ALL']?.[item.id] ?? costs['MD']?.[item.id] ?? 0;
+      setItemBaseCost(activeCost);
+
+      const stateMap: Record<string, number> = {};
+      statesList.forEach((st) => {
+        stateMap[st] = costs[st]?.[item.id] ?? costs['ALL']?.[item.id] ?? activeCost;
+      });
+      setItemCostsByState(stateMap);
     } else {
       setEditingItem(null);
       setItemName('');
@@ -165,6 +244,14 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       setItemFrequency(12);
       setItemIsOneTime(defaultCat === 'One-Time Setup Costs' || !!defaultYear);
       setItemTargetYear(defaultYear ?? simStartYear);
+      setItemScopeMode('ALL');
+      setItemSelectedStates(statesList.length > 0 ? [...statesList] : [activeState]);
+      setItemBaseCost(0);
+      const stateMap: Record<string, number> = {};
+      statesList.forEach((st) => {
+        stateMap[st] = 0;
+      });
+      setItemCostsByState(stateMap);
     }
     setCustomCategoryInput('');
     setItemModalOpen(true);
@@ -191,7 +278,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         return;
       }
       finalCategory = trimmedCat;
-      // Add category if not existing
       if (!catalog.categories.includes(finalCategory)) {
         setCatalog((prev) => ({
           ...prev,
@@ -199,6 +285,12 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         }));
       }
     }
+
+    const finalApplicableStates = itemScopeMode === 'ALL' 
+      ? ['ALL'] 
+      : (itemSelectedStates.length > 0 ? itemSelectedStates : [activeState]);
+
+    const itemId = editingItem ? editingItem.id : `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     if (editingItem) {
       // Edit existing
@@ -213,7 +305,8 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 description: itemDescription.trim() || undefined,
                 defaultFrequency: itemFrequency,
                 isOneTime: itemIsOneTime,
-                targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined
+                targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined,
+                applicableStates: finalApplicableStates
               }
             : it
         )
@@ -224,15 +317,15 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       }));
     } else {
       // Create new
-      const newId = `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const newItem: ExpenseItemDefinition = {
-        id: newId,
+        id: itemId,
         name: trimmedName,
         category: finalCategory,
         description: itemDescription.trim() || undefined,
         defaultFrequency: itemFrequency,
         isOneTime: itemIsOneTime,
-        targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined
+        targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined,
+        applicableStates: finalApplicableStates
       };
 
       setCatalog((prev) => ({
@@ -242,16 +335,20 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
 
       setFrequencies((prev) => ({
         ...prev,
-        [newId]: itemFrequency
-      }));
-
-      // Initialize costs with 0 for both states
-      setCosts((prev) => ({
-        ...prev,
-        [stateA]: { ...(prev[stateA] || {}), [newId]: 0 },
-        [stateB]: { ...(prev[stateB] || {}), [newId]: 0 }
+        [itemId]: itemFrequency
       }));
     }
+
+    // Save individual state costs
+    setCosts((prev) => {
+      const updated = { ...prev };
+      statesList.forEach((st) => {
+        const applies = finalApplicableStates.includes('ALL') || finalApplicableStates.includes(st);
+        const stateCost = applies ? (itemCostsByState[st] ?? itemBaseCost ?? 0) : 0;
+        updated[st] = { ...(updated[st] || {}), [itemId]: stateCost };
+      });
+      return updated;
+    });
 
     setItemModalOpen(false);
   };
@@ -330,7 +427,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const handlePromptDeleteCategory = (catName: string) => {
     const itemsInCat = catalog.items.filter((i) => i.category === catName);
     if (itemsInCat.length === 0) {
-      // Delete immediately if empty
       setCatalog((prev) => ({
         ...prev,
         categories: prev.categories.filter((c) => c !== catName)
@@ -338,7 +434,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       return;
     }
 
-    // Has items, open safe reassignment modal
     const otherCategories = catalog.categories.filter((c) => c !== catName);
     setReassignCategoryTarget(otherCategories[0] || 'Living');
     setDeleteCategoryTarget(catName);
@@ -355,7 +450,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         )
       }));
     } else {
-      // Delete all items in category
       const itemIdsToRemove = new Set(
         catalog.items.filter((i) => i.category === deleteCategoryTarget).map((i) => i.id)
       );
@@ -389,22 +483,65 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const handleSaveAll = () => {
     const updatedState: DetailedExpensesState = {
       catalog,
+      states: statesList,
       costs,
       frequencies,
-      MD: costs.MD || costs[stateA] || {},
-      FL: costs.FL || costs[stateB] || {}
+      MD: costs.MD || costs['MD'] || {},
+      FL: costs.FL || costs['FL'] || {}
     };
     onSave(updatedState);
     onClose();
   };
 
-  // Dynamic Totals Calculations
+  // Items filtering
   const recurringItems = useMemo(() => catalog.items.filter((i) => !i.isOneTime), [catalog.items]);
   const oneTimeItems = useMemo(() => catalog.items.filter((i) => i.isOneTime), [catalog.items]);
 
+  // Active state filtered recurring items
+  const visibleRecurringItems = useMemo(() => {
+    return recurringItems.filter((item) => {
+      // Text search
+      if (searchFilter.trim()) {
+        const q = searchFilter.toLowerCase();
+        const matches = item.name.toLowerCase().includes(q) || item.category.toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+      // Category filter
+      if (selectedCategoryFilter !== 'ALL' && item.category !== selectedCategoryFilter) {
+        return false;
+      }
+      // State applicability filter (unless user toggles show all)
+      if (!showAllStatesItems) {
+        const applies = !item.applicableStates || 
+          item.applicableStates.includes('ALL') || 
+          item.applicableStates.includes(activeState);
+        if (!applies) return false;
+      }
+      return true;
+    });
+  }, [recurringItems, searchFilter, selectedCategoryFilter, showAllStatesItems, activeState]);
+
+  // Active state filtered one-time items
+  const visibleOneTimeItems = useMemo(() => {
+    return oneTimeItems.filter((item) => {
+      if (searchFilter.trim()) {
+        const q = searchFilter.toLowerCase();
+        const matches = item.name.toLowerCase().includes(q) || item.category.toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+      if (!showAllStatesItems) {
+        const applies = !item.applicableStates || 
+          item.applicableStates.includes('ALL') || 
+          item.applicableStates.includes(activeState);
+        if (!applies) return false;
+      }
+      return true;
+    });
+  }, [oneTimeItems, searchFilter, showAllStatesItems, activeState]);
+
   const oneTimeItemsByYear = useMemo(() => {
     const groups: { [year: number]: ExpenseItemDefinition[] } = {};
-    for (const item of oneTimeItems) {
+    for (const item of visibleOneTimeItems) {
       const yr = item.targetYear ?? simStartYear;
       if (!groups[yr]) {
         groups[yr] = [];
@@ -418,45 +555,31 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         year,
         items: groups[year]
       }));
-  }, [oneTimeItems, simStartYear]);
+  }, [visibleOneTimeItems, simStartYear]);
 
-  const stateATotals = useMemo(() => {
-    const costMap = costs[stateA] || {};
+  // Active state totals calculation
+  const activeStateTotals = useMemo(() => {
+    const costMap = costs[activeState] || {};
     let recurringAnnual = 0;
     for (const item of recurringItems) {
-      const cost = costMap[item.id] || 0;
+      const applies = !item.applicableStates || item.applicableStates.includes('ALL') || item.applicableStates.includes(activeState);
+      if (!applies) continue;
+      const cost = costMap[item.id] ?? 0;
       const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
       recurringAnnual += cost * freq;
     }
     let oneTime = 0;
     for (const item of oneTimeItems) {
-      oneTime += costMap[item.id] || 0;
+      const applies = !item.applicableStates || item.applicableStates.includes('ALL') || item.applicableStates.includes(activeState);
+      if (!applies) continue;
+      oneTime += costMap[item.id] ?? 0;
     }
     return {
       recurringAnnual,
       recurringMonthly: recurringAnnual / 12,
       oneTime
     };
-  }, [costs, stateA, recurringItems, oneTimeItems, frequencies]);
-
-  const stateBTotals = useMemo(() => {
-    const costMap = costs[stateB] || {};
-    let recurringAnnual = 0;
-    for (const item of recurringItems) {
-      const cost = costMap[item.id] || 0;
-      const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
-      recurringAnnual += cost * freq;
-    }
-    let oneTime = 0;
-    for (const item of oneTimeItems) {
-      oneTime += costMap[item.id] || 0;
-    }
-    return {
-      recurringAnnual,
-      recurringMonthly: recurringAnnual / 12,
-      oneTime
-    };
-  }, [costs, stateB, recurringItems, oneTimeItems, frequencies]);
+  }, [costs, activeState, recurringItems, oneTimeItems, frequencies]);
 
   if (!isOpen) return null;
 
@@ -465,18 +588,18 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       <div className="w-full max-w-5xl bg-slate-900/95 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden glass-panel backdrop-blur-xl transition-all duration-300 transform scale-100 flex flex-col max-h-[92vh]">
         
         {/* Header with Tabs */}
-        <div className="p-6 border-b border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4 bg-slate-900/80">
+        <div className="p-5 border-b border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4 bg-slate-900/80">
           <div>
             <div className="flex items-center gap-3">
               <h3 className="text-lg font-black text-slate-100 tracking-tight flex items-center gap-2">
-                Detailed Living Expenses Configuration <Settings className="w-4 h-4 text-emerald-400" />
+                Detailed Living Expenses <Settings className="w-4 h-4 text-emerald-400" />
               </h3>
               <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                 {catalog.items.length} Configured Items
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Customize categories, side-by-side costs for {stateA} and {stateB}, billing frequencies, and one-time capital outlays.
+              Organize itemized household expenses, frequencies, and state-specific budgets without clutter.
             </p>
           </div>
 
@@ -492,7 +615,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 }`}
               >
                 <ArrowRightLeft className="w-3.5 h-3.5" />
-                State Expenses & Comparison
+                Expenses & Budgets
               </button>
               <button
                 onClick={() => setActiveTab('catalog')}
@@ -503,7 +626,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 }`}
               >
                 <Layers className="w-3.5 h-3.5" />
-                Catalog & Categories Manager
+                Categories & States
               </button>
             </div>
 
@@ -519,52 +642,125 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         {/* Content Body */}
         <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
 
-          {/* TAB 1: STATE EXPENSES & COMPARISON */}
+          {/* TAB 1: STATE EXPENSES VIEW */}
           {activeTab === 'expenses' && (
-            <div className="space-y-6">
-              {/* Action Toolbar */}
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider">
-                    Comparing States:
+            <div className="space-y-5">
+              
+              {/* State Selector & Action Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-slate-950/70 rounded-xl border border-slate-800/90 text-xs">
+                
+                {/* State Pills */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider flex items-center gap-1">
+                    <MapPin className="w-3 h-3 text-emerald-400" /> Active State:
                   </span>
-                  <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/30 font-bold">
-                    {stateA}
-                  </span>
-                  <span className="text-slate-600">vs</span>
-                  <span className="px-2 py-0.5 rounded bg-teal-500/10 text-teal-300 border border-teal-500/30 font-bold">
-                    {stateB}
-                  </span>
+                  
+                  {statesList.map((st) => {
+                    const isSelected = st === activeState;
+                    const isCurrent = st === currentState;
+                    const isReloc = st === targetState;
+                    return (
+                      <button
+                        key={st}
+                        onClick={() => setActiveState(st)}
+                        className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                          isSelected
+                            ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20 font-black'
+                            : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                        }`}
+                      >
+                        <span>{st}</span>
+                        {isCurrent && (
+                          <span className={`text-[9px] px-1 py-0.2 rounded font-normal ${isSelected ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
+                            Current
+                          </span>
+                        )}
+                        {isReloc && !isCurrent && (
+                          <span className={`text-[9px] px-1 py-0.2 rounded font-normal ${isSelected ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
+                            Reloc
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  <button
+                    onClick={() => setAddStateModalOpen(true)}
+                    className="px-2 py-1 text-[11px] font-semibold text-slate-400 hover:text-emerald-300 bg-slate-900/60 hover:bg-slate-800 border border-dashed border-slate-700/60 rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                    title="Add another state to your plan"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Add State
+                  </button>
                 </div>
 
+                {/* Toolbar Actions */}
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => handleCopyStateCosts(stateA, stateB)}
-                    className="px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700/80 border border-slate-700/60 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
-                    title={`Copy all ${stateA} dollar amounts into ${stateB}`}
+                    onClick={() => {
+                      setCopySourceState(activeState);
+                      const other = statesList.find(s => s !== activeState) || statesList[0];
+                      setCopyTargetState(other);
+                      setCopyCostsModalOpen(true);
+                    }}
+                    className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700/80 border border-slate-700/60 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                    title="Copy budget numbers to another state"
                   >
                     <Copy className="w-3 h-3" />
-                    Copy {stateA} → {stateB}
-                  </button>
-
-                  <button
-                    onClick={() => handleCopyStateCosts(stateB, stateA)}
-                    className="px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700/80 border border-slate-700/60 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
-                    title={`Copy all ${stateB} dollar amounts into ${stateA}`}
-                  >
-                    <Copy className="w-3 h-3" />
-                    Copy {stateB} → {stateA}
+                    Copy Costs...
                   </button>
 
                   <div className="h-4 w-px bg-slate-800 mx-1" />
 
                   <button
                     onClick={() => handleOpenItemModal()}
-                    className="px-3 py-1 text-[11px] font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/20"
+                    className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/20"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     Add Line Item
                   </button>
+                </div>
+              </div>
+
+              {/* Filters Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-xs">
+                <div className="flex items-center gap-2 flex-1 max-w-sm">
+                  <div className="relative w-full">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchFilter}
+                      onChange={(e) => setSearchFilter(e.target.value)}
+                      placeholder="Search expense line items..."
+                      className="w-full pl-8 pr-3 py-1.5 bg-slate-950/60 border border-slate-800 rounded-lg text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/50"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5 text-slate-500" />
+                    <select
+                      value={selectedCategoryFilter}
+                      onChange={(e) => setSelectedCategoryFilter(e.target.value)}
+                      className="bg-slate-950/60 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+                    >
+                      <option value="ALL">All Categories</option>
+                      {catalog.categories.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showAllStatesItems}
+                      onChange={(e) => setShowAllStatesItems(e.target.checked)}
+                      className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-0 focus:ring-offset-0"
+                    />
+                    <span>Show items from other states</span>
+                  </label>
                 </div>
               </div>
 
@@ -588,887 +784,929 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 </div>
               ) : (
                 catalog.categories.map((catName) => {
-                const catItems = recurringItems.filter((i) => i.category === catName);
-                if (catItems.length === 0) return null;
+                  const catItems = visibleRecurringItems.filter((i) => i.category === catName);
+                  if (catItems.length === 0) return null;
 
-                const subtotalA = catItems.reduce((sum, item) => {
-                  const cost = costs[stateA]?.[item.id] || 0;
-                  const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
-                  return sum + cost * freq;
-                }, 0);
+                  const catSubtotal = catItems.reduce((sum, item) => {
+                    const cost = costs[activeState]?.[item.id] ?? 0;
+                    const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
+                    return sum + cost * freq;
+                  }, 0);
 
-                const subtotalB = catItems.reduce((sum, item) => {
-                  const cost = costs[stateB]?.[item.id] || 0;
-                  const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
-                  return sum + cost * freq;
-                }, 0);
-
-                return (
-                  <div key={catName} className="space-y-2 bg-slate-950/40 p-4 rounded-xl border border-slate-800/60">
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                      <div className="flex items-center gap-2">
-                        <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
-                          {catName} Expenses
-                        </h4>
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          ({catItems.length} {catItems.length === 1 ? 'item' : 'items'})
-                        </span>
+                  return (
+                    <div key={catName} className="space-y-2 bg-slate-950/40 p-4 rounded-xl border border-slate-800/60">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
+                            {catName}
+                          </h4>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({catItems.length} {catItems.length === 1 ? 'item' : 'items'})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className="text-xs font-mono font-semibold text-slate-300">
+                            Subtotal ({activeState}): <span className="text-emerald-400 font-bold">{formatCurrency(catSubtotal)}/yr</span>
+                          </span>
+                          <button
+                            onClick={() => handleOpenItemModal(undefined, catName)}
+                            className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add to {catName}
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => handleOpenItemModal(undefined, catName)}
-                        className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
-                      >
-                        <Plus className="w-3 h-3" />
-                        Add to {catName}
-                      </button>
-                    </div>
 
-                    <div className="min-w-full overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="border-b border-slate-800/50 text-[10px] text-slate-500 font-bold uppercase">
-                            <th className="py-2 pr-4 w-5/12">Expense Name</th>
-                            <th className="py-2 px-2 text-center w-28">Freq / Year</th>
-                            <th className="py-2 px-2 text-right w-36">{stateA} Cost</th>
-                            <th className="py-2 pl-4 text-right w-36">{stateB} Cost</th>
-                            <th className="py-2 pl-2 text-right w-10"></th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/20 text-xs">
-                          {catItems.map((item) => {
-                            const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
-                            const costA = costs[stateA]?.[item.id] || 0;
-                            const costB = costs[stateB]?.[item.id] || 0;
+                      <div className="min-w-full overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-800/50 text-[10px] text-slate-500 font-bold uppercase">
+                              <th className="py-2 pr-4 w-5/12">Expense Name</th>
+                              <th className="py-2 px-2 text-center w-28">State Scope</th>
+                              <th className="py-2 px-2 text-center w-28">Freq / Year</th>
+                              <th className="py-2 px-2 text-right w-36">Budget Cost</th>
+                              <th className="py-2 px-2 text-right w-36">Annualized</th>
+                              <th className="py-2 pl-2 text-right w-16"></th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/20 text-xs">
+                            {catItems.map((item) => {
+                              const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
+                              const currentCost = costs[activeState]?.[item.id] ?? 0;
+                              const annualized = currentCost * freq;
+                              const appStates = item.applicableStates || ['ALL'];
+                              const isUniversal = appStates.includes('ALL');
+                              const appliesToActive = isUniversal || appStates.includes(activeState);
+                              const hasDifferingStateCosts = statesList.length > 1 && (() => {
+                                const applicableList = isUniversal ? statesList : statesList.filter((s) => appStates.includes(s));
+                                if (applicableList.length <= 1) return false;
+                                const firstCost = costs[applicableList[0]]?.[item.id] ?? 0;
+                                return applicableList.some((s) => (costs[s]?.[item.id] ?? 0) !== firstCost);
+                              })();
 
-                            return (
-                              <tr key={item.id} className="hover:bg-slate-900/50 transition-colors group">
-                                <td className="py-2 pr-4">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-slate-200 font-medium">{item.name}</span>
-                                    {item.description && (
-                                      <div className="relative group/tip cursor-help">
-                                        <Info className="w-3.5 h-3.5 text-slate-500 hover:text-slate-300 transition-colors" />
-                                        <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 hidden group-hover/tip:block z-50 w-56 p-2 bg-slate-950 text-[11px] text-slate-300 rounded-lg shadow-xl border border-slate-700 pointer-events-none">
-                                          {item.description}
+                              return (
+                                <tr key={item.id} className={`hover:bg-slate-900/50 transition-colors group ${!appliesToActive ? 'opacity-50' : ''}`}>
+                                  <td className="py-2 pr-4">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="text-slate-200 font-medium">{item.name}</span>
+                                      {hasDifferingStateCosts && (
+                                        <span className="text-[9px] font-semibold text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20" title="Cost varies across states">
+                                          State Rates
+                                        </span>
+                                      )}
+                                      {item.description && (
+                                        <div className="relative group/tip cursor-help">
+                                          <Info className="w-3.5 h-3.5 text-slate-500 hover:text-slate-300 transition-colors" />
+                                          <div className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block bg-slate-800 text-slate-200 text-[11px] p-2 rounded-lg shadow-lg max-w-xs z-30 border border-slate-700 pointer-events-none">
+                                            {item.description}
+                                          </div>
                                         </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className="py-1 px-2 text-center">
-                                  <select
-                                    value={
-                                      [12, 1, 4, 2, 26].includes(freq) ? freq : -1
-                                    }
-                                    onChange={(e) => {
-                                      const val = Number(e.target.value);
-                                      if (val !== -1) handleFrequencyChange(item.id, val);
-                                    }}
-                                    className="w-28 bg-slate-950 border border-slate-800/80 rounded px-2 py-1 text-center text-slate-200 font-mono text-[11px] focus:outline-none focus:border-emerald-500"
-                                  >
-                                    <option value={12}>Monthly (12)</option>
-                                    <option value={1}>Annual (1)</option>
-                                    <option value={4}>Quarterly (4)</option>
-                                    <option value={2}>Semi-Ann (2)</option>
-                                    <option value={26}>Bi-Weekly (26)</option>
-                                    {![12, 1, 4, 2, 26].includes(freq) && (
-                                      <option value={freq}>Custom ({freq}x)</option>
-                                    )}
-                                  </select>
-                                </td>
-                                <td className="py-1 px-2 text-right">
-                                  <div className="relative inline-block w-full max-w-[130px]">
-                                    <span className="absolute left-2.5 top-1.5 text-slate-500 font-mono text-xs">$</span>
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      value={costA === 0 ? '' : costA}
-                                      onChange={(e) => handleCostChange(stateA, item.id, Number(e.target.value))}
-                                      placeholder="0"
-                                      className="w-full bg-slate-950 border border-slate-800/80 rounded pl-5 pr-2 py-1 text-right text-slate-200 font-mono text-xs focus:outline-none focus:border-emerald-500"
-                                    />
-                                  </div>
-                                </td>
-                                <td className="py-1 pl-4 text-right">
-                                  <div className="relative inline-block w-full max-w-[130px]">
-                                    <span className="absolute left-2.5 top-1.5 text-slate-500 font-mono text-xs">$</span>
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      value={costB === 0 ? '' : costB}
-                                      onChange={(e) => handleCostChange(stateB, item.id, Number(e.target.value))}
-                                      placeholder="0"
-                                      className="w-full bg-slate-950 border border-slate-800/80 rounded pl-5 pr-2 py-1 text-right text-slate-200 font-mono text-xs focus:outline-none focus:border-emerald-500"
-                                    />
-                                  </div>
-                                </td>
-                                <td className="py-1 pl-2 text-right">
-                                  <button
-                                    onClick={() => handleOpenItemModal(item)}
-                                    className="p-1 text-slate-600 hover:text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                                    title="Edit item details"
-                                  >
-                                    <Edit2 className="w-3 h-3" />
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                        <tfoot className="border-t border-slate-800/80 bg-slate-950/40 text-xs font-bold text-slate-200">
-                          <tr>
-                            <td className="py-2 pr-4 text-emerald-400 font-semibold">
-                              Subtotal ({catName})
-                            </td>
-                            <td className="py-2 px-2 text-center text-slate-500 font-mono text-[10px] font-normal">
-                              Annualized
-                            </td>
-                            <td className="py-2 px-2 text-right text-emerald-400 font-mono font-bold">
-                              {formatCurrency(subtotalA)}
-                            </td>
-                            <td className="py-2 pl-4 text-right text-emerald-400 font-mono font-bold">
-                              {formatCurrency(subtotalB)}
-                            </td>
-                            <td></td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
-                  </div>
-                );
-              }))}
+                                      )}
+                                    </div>
+                                  </td>
 
-              {/* One-Time & Capital Outlays Section (Grouped by Year) */}
-              <div className="space-y-4 bg-amber-950/20 p-5 rounded-2xl border border-amber-500/30">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-500/20">
-                  <div>
-                    <h4 className="text-sm font-bold text-amber-400 uppercase tracking-wider flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-amber-400" />
-                      One-Time & Capital Expenses (Grouped by Year)
+                                  {/* State Scope Badge */}
+                                  <td className="py-2 px-2 text-center">
+                                    {isUniversal ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                                        <Globe className="w-2.5 h-2.5" /> All States
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                                        <MapPin className="w-2.5 h-2.5" /> {appStates.join(', ')}
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  {/* Frequency */}
+                                  <td className="py-2 px-2 text-center">
+                                    <div className="flex items-center justify-center gap-1 text-[11px] text-slate-300 font-mono">
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        max="365"
+                                        value={freq}
+                                        onChange={(e) => handleFrequencyChange(item.id, Number(e.target.value) || 1)}
+                                        className="w-12 bg-slate-900 border border-slate-700/60 rounded px-1.5 py-0.5 text-center text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50"
+                                      />
+                                      <span className="text-slate-500 text-[10px]">x/yr</span>
+                                    </div>
+                                  </td>
+
+                                  {/* Cost Input for Active State */}
+                                  <td className="py-2 px-2 text-right font-mono">
+                                    <div className="relative inline-block w-28">
+                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-xs">$</span>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        value={currentCost || ''}
+                                        placeholder="0"
+                                        onChange={(e) => handleCostChange(activeState, item.id, Number(e.target.value) || 0)}
+                                        className="w-full pl-5 pr-2 py-1 bg-slate-900/90 border border-slate-700/60 rounded text-right text-xs text-slate-100 font-mono font-medium focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/30"
+                                      />
+                                    </div>
+                                  </td>
+
+                                  {/* Annualized Total */}
+                                  <td className="py-2 px-2 text-right font-mono font-bold text-slate-300">
+                                    {formatCurrency(annualized)}
+                                  </td>
+
+                                  {/* Actions */}
+                                  <td className="py-2 pl-2 text-right">
+                                    <div className="flex items-center justify-end gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
+                                      <button
+                                        onClick={() => handleOpenItemModal(item)}
+                                        className="p-1 text-slate-400 hover:text-emerald-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                                        title="Edit Item Details"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteItem(item.id)}
+                                        className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                                        title="Delete Item"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+
+              {/* One-Time Outlays Section */}
+              <div className="space-y-3 bg-slate-950/40 p-4 rounded-xl border border-slate-800/60 mt-6">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                      One-Time Capital Outlays
                     </h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Lump-sum capital outlays (e.g. roof replacement, vehicle purchase, relocation setup). Enter amounts in today's dollars; the simulation engine scales them with inflation for the target year.
-                    </p>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      ({visibleOneTimeItems.length} {visibleOneTimeItems.length === 1 ? 'item' : 'items'})
+                    </span>
                   </div>
                   <button
-                    onClick={() => handleOpenItemModal(undefined, 'One-Time Setup Costs')}
-                    className="self-start sm:self-auto text-xs font-semibold text-amber-300 hover:text-amber-200 flex items-center gap-1.5 transition-colors cursor-pointer bg-amber-500/20 hover:bg-amber-500/30 px-3 py-1.5 rounded-lg border border-amber-500/40 shadow-sm"
+                    onClick={() => handleOpenItemModal(undefined, 'One-Time Setup Costs', relocationYear ?? simStartYear)}
+                    className="text-[10px] font-semibold text-slate-400 hover:text-amber-300 flex items-center gap-1 transition-colors cursor-pointer"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    Add One-Time Cost
+                    <Plus className="w-3 h-3" />
+                    Add One-Time Outlay
                   </button>
                 </div>
 
-                {oneTimeItemsByYear.length === 0 ? (
-                  <div className="py-8 text-center text-slate-400 text-xs bg-slate-950/40 rounded-xl border border-dashed border-amber-500/20">
-                    No one-time capital expenses configured. Click "Add One-Time Cost" above to schedule future outlays (e.g. roof in 5 years, vehicle replacement, relocation costs).
-                  </div>
+                {visibleOneTimeItems.length === 0 ? (
+                  <p className="text-xs text-slate-500 italic py-2">
+                    No one-time capital outlays configured for {activeState}. (e.g. moving costs, initial furnishings, golf cart purchase).
+                  </p>
                 ) : (
-                  <div className="space-y-4">
-                    {oneTimeItemsByYear.map(({ year, items: yearItems }) => {
-                      const yearSubtotalA = yearItems.reduce((sum, item) => sum + (costs[stateA]?.[item.id] || 0), 0);
-                      const yearSubtotalB = yearItems.reduce((sum, item) => sum + (costs[stateB]?.[item.id] || 0), 0);
-                      const isStartYear = year === simStartYear;
-                      const isRelocYear = relocationYear !== null && year === relocationYear;
-                      const yearsOut = year - simStartYear;
+                  oneTimeItemsByYear.map(({ year, items }) => {
+                    const yearTotal = items.reduce((sum, it) => sum + (costs[activeState]?.[it.id] ?? 0), 0);
+                    return (
+                      <div key={year} className="space-y-2 bg-slate-900/40 p-3 rounded-lg border border-slate-800/50">
+                        <div className="flex items-center justify-between text-xs font-bold text-slate-300 pb-1 border-b border-slate-800/40">
+                          <span>Target Year: <span className="text-amber-300 font-mono">{year}</span></span>
+                          <span className="font-mono text-slate-400">Total ({activeState}): <span className="text-amber-400 font-bold">{formatCurrency(yearTotal)}</span></span>
+                        </div>
 
-                      return (
-                        <div key={year} className="bg-slate-950/60 rounded-xl border border-amber-500/25 overflow-hidden">
-                          {/* Year Group Header */}
-                          <div className="px-4 py-2.5 bg-amber-950/30 border-b border-amber-500/20 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-amber-300 text-sm">
-                                Year {year}
-                              </span>
-                              {isStartYear && (
-                                <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                                  Start Year
-                                </span>
-                              )}
-                              {isRelocYear && (
-                                <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
-                                  Relocation Year
-                                </span>
-                              )}
-                              {yearsOut > 0 && !isStartYear && (
-                                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                                  +{yearsOut} {yearsOut === 1 ? 'yr' : 'yrs'}
-                                </span>
-                              )}
-                            </div>
+                        <div className="min-w-full overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="text-[10px] text-slate-500 font-bold uppercase">
+                                <th className="py-1 pr-4 w-6/12">Outlay Name</th>
+                                <th className="py-1 px-2 text-center w-28">State Scope</th>
+                                <th className="py-1 px-2 text-right w-36">Budget Cost</th>
+                                <th className="py-1 pl-2 text-right w-16"></th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/20 text-xs">
+                              {items.map((item) => {
+                                const currentCost = costs[activeState]?.[item.id] ?? 0;
+                                const appStates = item.applicableStates || ['ALL'];
+                                const isUniversal = appStates.includes('ALL');
+                                const hasDifferingStateCosts = statesList.length > 1 && (() => {
+                                  const applicableList = isUniversal ? statesList : statesList.filter((s) => appStates.includes(s));
+                                  if (applicableList.length <= 1) return false;
+                                  const firstCost = costs[applicableList[0]]?.[item.id] ?? 0;
+                                  return applicableList.some((s) => (costs[s]?.[item.id] ?? 0) !== firstCost);
+                                })();
 
-                            <button
-                              onClick={() => handleOpenItemModal(undefined, 'One-Time Setup Costs', year)}
-                              className="text-[11px] font-medium text-amber-400/90 hover:text-amber-200 flex items-center gap-1 transition-colors cursor-pointer hover:underline"
-                            >
-                              <Plus className="w-3 h-3" />
-                              Add item to {year}
-                            </button>
-                          </div>
-
-                          {/* Table for this Year */}
-                          <div className="min-w-full overflow-x-auto">
-                            <table className="w-full text-left border-collapse">
-                              <thead>
-                                <tr className="border-b border-amber-500/15 text-[10px] text-amber-300/60 font-bold uppercase">
-                                  <th className="py-2 pl-4 pr-4 w-5/12">Expense Item</th>
-                                  <th className="py-2 px-2 text-center w-28">Timing</th>
-                                  <th className="py-2 px-2 text-right w-36">{stateA} Cost</th>
-                                  <th className="py-2 pl-4 text-right w-36">{stateB} Cost</th>
-                                  <th className="py-2 pl-2 pr-3 text-right w-10"></th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-amber-500/10 text-xs">
-                                {yearItems.map((item) => {
-                                  const costA = costs[stateA]?.[item.id] || 0;
-                                  const costB = costs[stateB]?.[item.id] || 0;
-
-                                  return (
-                                    <tr key={item.id} className="hover:bg-amber-950/20 transition-colors group">
-                                      <td className="py-2 pl-4 pr-4">
-                                        <div className="flex items-center gap-1.5">
-                                          <span className="text-slate-200 font-medium">{item.name}</span>
-                                          {item.description && (
-                                            <div className="relative group/tip cursor-help">
-                                              <Info className="w-3.5 h-3.5 text-slate-500 hover:text-slate-300 transition-colors" />
-                                              <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 hidden group-hover/tip:block z-50 w-56 p-2 bg-slate-950 text-[11px] text-slate-300 rounded-lg shadow-xl border border-slate-700 pointer-events-none">
-                                                {item.description}
-                                              </div>
-                                            </div>
-                                          )}
-                                        </div>
-                                      </td>
-                                      <td className="py-1 px-2 text-center text-slate-400 font-mono text-[10px]">
-                                        Year {year} Lump Sum
-                                      </td>
-                                      <td className="py-1 px-2 text-right">
-                                        <div className="relative inline-block w-full max-w-[130px]">
-                                          <span className="absolute left-2.5 top-1.5 text-slate-500 font-mono text-xs">$</span>
-                                          <input
-                                            type="number"
-                                            min="0"
-                                            value={costA === 0 ? '' : costA}
-                                            onChange={(e) => handleCostChange(stateA, item.id, Number(e.target.value))}
-                                            placeholder="0"
-                                            className="w-full bg-slate-950 border border-slate-800/80 rounded pl-5 pr-2 py-1 text-right text-slate-200 font-mono text-xs focus:outline-none focus:border-amber-500"
-                                          />
-                                        </div>
-                                      </td>
-                                      <td className="py-1 pl-4 text-right">
-                                        <div className="relative inline-block w-full max-w-[130px]">
-                                          <span className="absolute left-2.5 top-1.5 text-slate-500 font-mono text-xs">$</span>
-                                          <input
-                                            type="number"
-                                            min="0"
-                                            value={costB === 0 ? '' : costB}
-                                            onChange={(e) => handleCostChange(stateB, item.id, Number(e.target.value))}
-                                            placeholder="0"
-                                            className="w-full bg-slate-950 border border-slate-800/80 rounded pl-5 pr-2 py-1 text-right text-slate-200 font-mono text-xs focus:outline-none focus:border-amber-500"
-                                          />
-                                        </div>
-                                      </td>
-                                      <td className="py-1 pl-2 pr-3 text-right">
+                                return (
+                                  <tr key={item.id} className="hover:bg-slate-900/50 transition-colors group">
+                                    <td className="py-1.5 pr-4">
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-slate-200 font-medium">{item.name}</span>
+                                        {hasDifferingStateCosts && (
+                                          <span className="text-[9px] font-semibold text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20" title="Cost varies across states">
+                                            State Rates
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-2 text-center">
+                                      {isUniversal ? (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                                          <Globe className="w-2.5 h-2.5" /> All States
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                                          <MapPin className="w-2.5 h-2.5" /> {appStates.join(', ')}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-1.5 px-2 text-right font-mono">
+                                      <div className="relative inline-block w-28">
+                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-xs">$</span>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="1"
+                                          value={currentCost || ''}
+                                          placeholder="0"
+                                          onChange={(e) => handleCostChange(activeState, item.id, Number(e.target.value) || 0)}
+                                          className="w-full pl-5 pr-2 py-1 bg-slate-900/90 border border-slate-700/60 rounded text-right text-xs text-slate-100 font-mono font-medium focus:outline-none focus:border-amber-500/50"
+                                        />
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 pl-2 text-right">
+                                      <div className="flex items-center justify-end gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
                                         <button
                                           onClick={() => handleOpenItemModal(item)}
-                                          className="p-1 text-slate-500 hover:text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                                          title="Edit item details"
+                                          className="p-1 text-slate-400 hover:text-amber-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                                          title="Edit Outlay"
                                         >
-                                          <Edit2 className="w-3 h-3" />
+                                          <Edit2 className="w-3.5 h-3.5" />
                                         </button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                              <tfoot className="border-t border-amber-500/20 bg-amber-950/30 text-xs font-bold text-slate-200">
-                                <tr>
-                                  <td className="py-2 pl-4 pr-4 text-amber-300/90 font-semibold">
-                                    Subtotal ({year})
-                                  </td>
-                                  <td className="py-2 px-2 text-center text-slate-500 font-mono text-[10px] font-normal">
-                                    Today's $
-                                  </td>
-                                  <td className="py-2 px-2 text-right text-amber-400 font-mono font-bold">
-                                    {formatCurrency(yearSubtotalA)}
-                                  </td>
-                                  <td className="py-2 pl-4 text-right text-amber-400 font-mono font-bold">
-                                    {formatCurrency(yearSubtotalB)}
-                                  </td>
-                                  <td></td>
-                                </tr>
-                              </tfoot>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
-
-                    {/* Overall One-Time Grand Totals */}
-                    <div className="p-3 bg-amber-950/40 rounded-xl border border-amber-500/30 flex items-center justify-between text-xs font-bold">
-                      <div className="flex items-center gap-2 text-amber-300">
-                        <Sparkles className="w-4 h-4 text-amber-400" />
-                        <span>Grand Total All One-Time Costs ({oneTimeItems.length} items across {oneTimeItemsByYear.length} scheduled years)</span>
-                      </div>
-                      <div className="flex items-center gap-6 font-mono text-sm">
-                        <div>
-                          <span className="text-slate-400 font-normal text-xs mr-2">{stateA}:</span>
-                          <span className="text-amber-400">{formatCurrency(stateATotals.oneTime)}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 font-normal text-xs mr-2">{stateB}:</span>
-                          <span className="text-amber-400">{formatCurrency(stateBTotals.oneTime)}</span>
+                                        <button
+                                          onClick={() => handleDeleteItem(item.id)}
+                                          className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                                          title="Delete Outlay"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
-                    </div>
-                  </div>
+                    );
+                  })
                 )}
               </div>
+
             </div>
           )}
 
-          {/* TAB 2: CATALOG & CATEGORIES MANAGER */}
+          {/* TAB 2: CATALOG, CATEGORIES & STATES MANAGER */}
           {activeTab === 'catalog' && (
             <div className="space-y-6">
               
-              {/* Category Management Bar */}
-              <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                      <Layers className="w-4 h-4 text-emerald-400" />
-                      Expense Categories
+              {/* State Roster Manager */}
+              <div className="bg-slate-950/40 p-4 rounded-xl border border-slate-800/60 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-emerald-400" />
+                    <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      Configured Plan States
                     </h4>
-                    <p className="text-xs text-slate-400">
-                      Add, rename, or remove categories. Populated categories will prompt for safe item reassignment.
-                    </p>
                   </div>
                   <button
-                    onClick={() => handleOpenCategoryModal()}
-                    className="px-3 py-1.5 text-xs font-bold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                    onClick={() => setAddStateModalOpen(true)}
+                    className="px-2.5 py-1 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1 cursor-pointer"
                   >
-                    <FolderPlus className="w-3.5 h-3.5" />
-                    New Category
+                    <Plus className="w-3.5 h-3.5" />
+                    Add State
                   </button>
                 </div>
 
-                <div className="flex flex-wrap gap-2 pt-2">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                  {statesList.map((st) => (
+                    <div key={st} className="flex items-center justify-between p-3 bg-slate-900 rounded-lg border border-slate-800">
+                      <div>
+                        <span className="font-black font-mono text-sm text-emerald-400">{st}</span>
+                        <span className="block text-[10px] text-slate-500">
+                          {st === currentState ? 'Current Residence' : st === targetState ? 'Relocation State' : 'Alternative State'}
+                        </span>
+                      </div>
+                      {st !== currentState && st !== targetState && (
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Remove state ${st} from plan?`)) {
+                              setStatesList(prev => prev.filter(s => s !== st));
+                              if (activeState === st) setActiveState(currentState || 'MD');
+                            }
+                          }}
+                          className="p-1 text-slate-500 hover:text-red-400 rounded transition-colors cursor-pointer"
+                          title="Remove State"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Categories Manager */}
+              <div className="bg-slate-950/40 p-4 rounded-xl border border-slate-800/60 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <FolderPlus className="w-4 h-4 text-emerald-400" />
+                    <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      Expense Categories Manager
+                    </h4>
+                  </div>
+                  <button
+                    onClick={() => handleOpenCategoryModal()}
+                    className="px-2.5 py-1 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Add Category
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
                   {catalog.categories.map((cat) => {
                     const count = catalog.items.filter((i) => i.category === cat).length;
                     return (
-                      <div
-                        key={cat}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs"
-                      >
-                        <span className="font-semibold text-slate-200">{cat}</span>
-                        <span className="px-1.5 py-0.2 bg-slate-800 text-slate-400 rounded text-[10px] font-mono">
-                          {count}
-                        </span>
-                        <button
-                          onClick={() => handleOpenCategoryModal(cat)}
-                          className="text-slate-500 hover:text-slate-200 cursor-pointer"
-                          title="Rename Category"
-                        >
-                          <Edit2 className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => handlePromptDeleteCategory(cat)}
-                          className="text-slate-500 hover:text-rose-400 cursor-pointer"
-                          title="Delete Category"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                      <div key={cat} className="flex items-center justify-between p-3 bg-slate-900 rounded-lg border border-slate-800">
+                        <div>
+                          <span className="font-bold text-xs text-slate-200">{cat}</span>
+                          <span className="block text-[10px] text-slate-500">{count} items mapped</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleOpenCategoryModal(cat)}
+                            className="p-1 text-slate-400 hover:text-emerald-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                            title="Rename Category"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handlePromptDeleteCategory(cat)}
+                            className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                            title="Delete Category"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Items Table & Filter */}
-              <div className="space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 flex-1">
-                    <div className="relative flex-1 max-w-sm">
-                      <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-500" />
-                      <input
-                        type="text"
-                        value={searchFilter}
-                        onChange={(e) => setSearchFilter(e.target.value)}
-                        placeholder="Search items by name or description..."
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                    <select
-                      value={selectedCategoryFilter}
-                      onChange={(e) => setSelectedCategoryFilter(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-emerald-500"
-                    >
-                      <option value="ALL">All Categories</option>
-                      {catalog.categories.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                      <option value="ONE_TIME">One-Time Setup Costs</option>
-                    </select>
-                  </div>
-
-                  <button
-                    onClick={() => handleOpenItemModal()}
-                    className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Add Expense Item
-                  </button>
-                </div>
-
-                <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/40">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-800 bg-slate-950/80 text-[10px] text-slate-500 font-bold uppercase">
-                        <th className="py-2.5 px-4">Item Name</th>
-                        <th className="py-2.5 px-3">Category</th>
-                        <th className="py-2.5 px-3 text-center">Default Cadence</th>
-                        <th className="py-2.5 px-3">Type</th>
-                        <th className="py-2.5 px-4 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/30 text-xs">
-                      {catalog.items.filter((item) => {
-                        if (searchFilter) {
-                          const q = searchFilter.toLowerCase();
-                          const matchName = item.name.toLowerCase().includes(q);
-                          const matchDesc = item.description?.toLowerCase().includes(q);
-                          if (!matchName && !matchDesc) return false;
-                        }
-                        if (selectedCategoryFilter === 'ONE_TIME') return !!item.isOneTime;
-                        if (selectedCategoryFilter !== 'ALL') return item.category === selectedCategoryFilter;
-                        return true;
-                      }).length === 0 ? (
-                        <tr>
-                          <td colSpan={5} className="py-8 text-center text-slate-400 text-xs">
-                            No items in catalog. Click "Add Expense Item" above to create one.
-                          </td>
-                        </tr>
-                      ) : (
-                        catalog.items
-                          .filter((item) => {
-                            if (searchFilter) {
-                              const q = searchFilter.toLowerCase();
-                              const matchName = item.name.toLowerCase().includes(q);
-                              const matchDesc = item.description?.toLowerCase().includes(q);
-                              if (!matchName && !matchDesc) return false;
-                            }
-                            if (selectedCategoryFilter === 'ONE_TIME') return !!item.isOneTime;
-                            if (selectedCategoryFilter !== 'ALL') return item.category === selectedCategoryFilter;
-                            return true;
-                          })
-                          .map((item) => (
-                            <tr key={item.id} className="hover:bg-slate-900/40 transition-colors">
-                              <td className="py-2.5 px-4">
-                                <div className="font-semibold text-slate-200">{item.name}</div>
-                                {item.description && (
-                                  <div className="text-[11px] text-slate-400 truncate max-w-md">
-                                    {item.description}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px]">
-                                  {item.category}
-                                </span>
-                              </td>
-                              <td className="py-2.5 px-3 text-center font-mono text-slate-400">
-                                {item.isOneTime ? `1x (Year ${item.targetYear ?? simStartYear})` : `${item.defaultFrequency}x / year`}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                {item.isOneTime ? (
-                                  <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] font-bold uppercase whitespace-nowrap">
-                                    One-Time (Yr {item.targetYear ?? simStartYear})
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold uppercase">
-                                    Recurring
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-2.5 px-4 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    onClick={() => handleOpenItemModal(item)}
-                                    className="p-1.5 text-slate-400 hover:text-slate-100 bg-slate-800/40 hover:bg-slate-800 rounded border border-slate-700/40 transition-colors cursor-pointer"
-                                    title="Edit item"
-                                  >
-                                    <Edit2 className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeleteItem(item.id)}
-                                    className="p-1.5 text-slate-400 hover:text-rose-400 bg-slate-800/40 hover:bg-slate-800 rounded border border-slate-700/40 transition-colors cursor-pointer"
-                                    title="Delete item"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
             </div>
           )}
 
         </div>
 
-        {/* Dynamic Totals Summary Footer */}
-        <div className="px-6 py-4 bg-slate-950/90 border-t border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4 font-sans">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2 text-xs">
-            <div>
-              <span className="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
-                {stateA} Recurring Cost
-              </span>
-              <span className="text-slate-200 font-bold font-mono text-sm">
-                {formatCurrency(stateATotals.recurringMonthly)}/mo
-              </span>
-              <span className="text-slate-500 font-mono text-[10px] block">
-                ({formatCurrency(stateATotals.recurringAnnual)}/yr)
+        {/* Footer Summary & Actions */}
+        <div className="p-4 bg-slate-950 border-t border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-6 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">Viewing State:</span>
+              <span className="font-bold text-emerald-400 font-mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">
+                {activeState}
               </span>
             </div>
-
             <div>
-              <span className="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
-                {stateB} Recurring Cost
-              </span>
-              <span className="text-slate-200 font-bold font-mono text-sm">
-                {formatCurrency(stateBTotals.recurringMonthly)}/mo
-              </span>
-              <span className="text-slate-500 font-mono text-[10px] block">
-                ({formatCurrency(stateBTotals.recurringAnnual)}/yr)
+              <span className="text-slate-400">Monthly Living:</span>{' '}
+              <span className="font-bold font-mono text-slate-200">
+                {formatCurrency(activeStateTotals.recurringMonthly)}/mo
               </span>
             </div>
-
             <div>
-              <span className="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
-                {stateA} One-Time Costs
+              <span className="text-slate-400">Annualized Living:</span>{' '}
+              <span className="font-bold font-mono text-emerald-400">
+                {formatCurrency(activeStateTotals.recurringAnnual)}/yr
               </span>
-              <span className="text-amber-400 font-bold font-mono text-sm">
-                {formatCurrency(stateATotals.oneTime)}
-              </span>
-              <span className="text-slate-500 text-[10px] block">Total scheduled capital outlays</span>
             </div>
-
-            <div>
-              <span className="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
-                {stateB} One-Time Costs
-              </span>
-              <span className="text-amber-400 font-bold font-mono text-sm">
-                {formatCurrency(stateBTotals.oneTime)}
-              </span>
-              <span className="text-slate-500 text-[10px] block">Total scheduled capital outlays</span>
-            </div>
+            {activeStateTotals.oneTime > 0 && (
+              <div>
+                <span className="text-slate-400">One-Time Outlays:</span>{' '}
+                <span className="font-bold font-mono text-amber-400">
+                  {formatCurrency(activeStateTotals.oneTime)}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
             <button
               onClick={onClose}
-              className="px-5 py-2.5 text-xs font-bold text-slate-300 hover:text-slate-100 bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 rounded-xl transition-all cursor-pointer"
+              className="px-4 py-2 text-xs font-semibold text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 rounded-lg transition-all cursor-pointer"
             >
               Cancel
             </button>
             <button
               onClick={handleSaveAll}
-              className="px-5 py-2.5 text-xs font-bold text-slate-950 bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 rounded-xl shadow-lg shadow-emerald-500/10 hover:shadow-emerald-500/20 active:scale-98 transition-all flex items-center gap-1.5 cursor-pointer"
+              className="px-5 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-500/20"
             >
               <Check className="w-4 h-4" />
-              Save Changes
+              Save Expenses
             </button>
           </div>
         </div>
 
       </div>
 
-      {/* ========================================================================= */}
-      {/* MODAL 1: ADD / EDIT ITEM MODAL */}
-      {/* ========================================================================= */}
+      {/* MODAL 1: ADD / EDIT ITEM */}
       {itemModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h4 className="text-sm font-bold text-slate-100">
-                {editingItem ? 'Edit Expense Item' : 'Add New Expense Item'}
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                {editingItem ? <Edit2 className="w-4 h-4 text-emerald-400" /> : <Plus className="w-4 h-4 text-emerald-400" />}
+                {editingItem ? 'Edit Line Item' : 'Add New Line Item'}
               </h4>
-              <button
-                onClick={() => setItemModalOpen(false)}
-                className="text-slate-400 hover:text-slate-100 cursor-pointer"
-              >
+              <button onClick={() => setItemModalOpen(false)} className="text-slate-400 hover:text-slate-200">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {itemError && (
-              <div className="p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
+              <div className="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
                 <span>{itemError}</span>
               </div>
             )}
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">Expense Name *</label>
+                <label className="block text-slate-300 font-semibold mb-1">Item Name *</label>
                 <input
                   type="text"
                   value={itemName}
-                  onChange={(e) => {
-                    setItemName(e.target.value);
-                    if (itemError) setItemError(null);
-                  }}
-                  placeholder="e.g., Homeowners Insurance, Roof Replacement, Vehicle Purchase"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
+                  onChange={(e) => setItemName(e.target.value)}
+                  placeholder="e.g. Termite Bond, Auto Gas, Streaming Services"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500/50 text-xs"
                 />
               </div>
 
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Category</label>
-                <select
-                  value={itemCategory}
-                  onChange={(e) => setItemCategory(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
-                >
-                  {catalog.categories.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
-                  ))}
-                  <option value="One-Time Setup Costs">One-Time Setup Costs</option>
-                  <option value="__NEW__">+ Create New Category...</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Category</label>
+                  <select
+                    value={itemCategory}
+                    onChange={(e) => setItemCategory(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50"
+                  >
+                    {catalog.categories.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                    <option value="__NEW__">+ Create New Category...</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Frequency</label>
+                  <select
+                    value={itemFrequency}
+                    onChange={(e) => setItemFrequency(Number(e.target.value))}
+                    disabled={itemIsOneTime}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50 disabled:opacity-40"
+                  >
+                    <option value={12}>Monthly (12x/yr)</option>
+                    <option value={4}>Quarterly (4x/yr)</option>
+                    <option value={2}>Semi-Annual (2x/yr)</option>
+                    <option value={1}>Annual (1x/yr)</option>
+                    <option value={26}>Bi-Weekly (26x/yr)</option>
+                    <option value={52}>Weekly (52x/yr)</option>
+                  </select>
+                </div>
               </div>
 
               {itemCategory === '__NEW__' && (
                 <div>
-                  <label className="block text-slate-300 font-semibold mb-1">New Category Name</label>
+                  <label className="block text-slate-300 font-semibold mb-1">New Category Name *</label>
                   <input
                     type="text"
                     value={customCategoryInput}
                     onChange={(e) => setCustomCategoryInput(e.target.value)}
-                    placeholder="Enter category name"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
+                    placeholder="Enter custom category name..."
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-emerald-500/50"
                   />
                 </div>
               )}
 
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Description (Optional)</label>
-                <textarea
-                  value={itemDescription}
-                  onChange={(e) => setItemDescription(e.target.value)}
-                  rows={2}
-                  placeholder="Optional notes or details shown on tooltip"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500 resize-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">
-                    {itemIsOneTime ? 'Target Calendar Year' : 'Default Cadence'}
-                  </label>
-                  {itemIsOneTime ? (
+              {/* State Scope Selector */}
+              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2">
+                <label className="block text-slate-300 font-semibold">State Applicability</label>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-1.5 cursor-pointer text-slate-200">
                     <input
-                      type="number"
-                      min={simStartYear}
-                      value={itemTargetYear}
-                      onChange={(e) => setItemTargetYear(e.target.value === '' ? '' : Number(e.target.value))}
-                      onBlur={() => {
-                        if (itemTargetYear === '' || Number(itemTargetYear) < simStartYear) {
-                          setItemTargetYear(simStartYear);
-                        }
-                      }}
-                      placeholder={String(simStartYear)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
+                      type="radio"
+                      name="scopeMode"
+                      checked={itemScopeMode === 'ALL'}
+                      onChange={() => setItemScopeMode('ALL')}
+                      className="text-emerald-500 focus:ring-0"
                     />
-                  ) : (
-                    <select
-                      value={itemFrequency}
-                      onChange={(e) => setItemFrequency(Number(e.target.value))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
-                    >
-                      <option value={12}>Monthly (12x/yr)</option>
-                      <option value={1}>Annual (1x/yr)</option>
-                      <option value={4}>Quarterly (4x/yr)</option>
-                      <option value={2}>Semi-Annual (2x/yr)</option>
-                      <option value={26}>Bi-Weekly (26x/yr)</option>
-                    </select>
-                  )}
+                    <span>All States (Universal)</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-slate-200">
+                    <input
+                      type="radio"
+                      name="scopeMode"
+                      checked={itemScopeMode === 'SPECIFIC'}
+                      onChange={() => setItemScopeMode('SPECIFIC')}
+                      className="text-emerald-500 focus:ring-0"
+                    />
+                    <span>Specific State(s) Only</span>
+                  </label>
                 </div>
 
+                {itemScopeMode === 'SPECIFIC' && (
+                  <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] text-slate-400">Select States:</span>
+                    {statesList.map((st) => {
+                      const isChecked = itemSelectedStates.includes(st);
+                      return (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => {
+                            if (isChecked) {
+                              if (itemSelectedStates.length > 1) {
+                                setItemSelectedStates(prev => prev.filter(s => s !== st));
+                              }
+                            } else {
+                              setItemSelectedStates(prev => [...prev, st]);
+                            }
+                          }}
+                          className={`px-2 py-1 rounded text-xs font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                            isChecked
+                              ? 'bg-blue-500/20 text-blue-300 border-blue-500/50'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                          }`}
+                        >
+                          {isChecked ? <CheckSquare className="w-3 h-3 text-blue-400" /> : <Square className="w-3 h-3" />}
+                          {st}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Per-State Cost Configuration */}
+              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="block text-slate-300 font-semibold">
+                    Base / Default Cost ($ / occurrence)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated: Record<string, number> = {};
+                      statesList.forEach((st) => {
+                        updated[st] = itemBaseCost;
+                      });
+                      setItemCostsByState(updated);
+                    }}
+                    className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 rounded cursor-pointer transition-colors"
+                  >
+                    Apply to All States
+                  </button>
+                </div>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={itemBaseCost || ''}
+                    placeholder="0"
+                    onChange={(e) => {
+                      const val = Number(e.target.value) || 0;
+                      setItemBaseCost(val);
+                    }}
+                    className="w-full pl-7 pr-3 py-2 bg-slate-900 border border-slate-700/60 rounded-lg text-slate-100 font-mono text-xs focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+
+                {/* State-specific cost overrides */}
+                <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-400">
+                      Per-State Rates {itemScopeMode === 'ALL' ? '(Universal Item)' : '(Selected States)'}:
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {(itemScopeMode === 'ALL' ? statesList : statesList.filter((s) => itemSelectedStates.includes(s))).map((st) => (
+                      <div key={st} className="p-2 bg-slate-900/80 rounded border border-slate-800 flex flex-col gap-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                          <span>{st}</span>
+                          {st === activeState && <span className="text-[9px] text-emerald-400 lowercase font-mono">(active)</span>}
+                        </span>
+                        <div className="relative">
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-mono">$</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={itemCostsByState[st] ?? itemBaseCost ?? ''}
+                            placeholder={String(itemBaseCost || 0)}
+                            onChange={(e) => {
+                              const val = Number(e.target.value) || 0;
+                              setItemCostsByState((prev) => ({
+                                ...prev,
+                                [st]: val
+                              }));
+                            }}
+                            className="w-full pl-5 pr-2 py-1 bg-slate-950 border border-slate-700/60 rounded text-right text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500/50"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Expense Type & Target Year */}
+              <div className="grid grid-cols-2 gap-3 items-center">
                 <div>
                   <label className="block text-slate-300 font-semibold mb-1">Expense Type</label>
-                  <label className="flex items-center gap-2 p-2 bg-slate-950 border border-slate-800 rounded-lg cursor-pointer">
+                  <label className="flex items-center gap-2 py-2 cursor-pointer text-slate-300">
                     <input
                       type="checkbox"
                       checked={itemIsOneTime}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setItemIsOneTime(checked);
-                        if (checked) {
-                          setItemFrequency(1);
-                          if (!itemTargetYear) setItemTargetYear(simStartYear);
-                        }
-                      }}
-                      className="rounded text-amber-500 focus:ring-0 focus:outline-none"
+                      onChange={(e) => setItemIsOneTime(e.target.checked)}
+                      className="rounded bg-slate-950 border-slate-700 text-amber-500 focus:ring-0"
                     />
-                    <span className="text-slate-300 font-medium">One-Time / Capital Outlay</span>
+                    <span>One-Time Outlay</span>
                   </label>
                 </div>
+
+                {itemIsOneTime && (
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Target Year</label>
+                    <input
+                      type="number"
+                      min={simStartYear}
+                      max={2080}
+                      value={itemTargetYear}
+                      onChange={(e) => setItemTargetYear(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 font-mono text-xs focus:outline-none focus:border-amber-500/50"
+                    />
+                  </div>
+                )}
               </div>
 
-              {itemIsOneTime && (
-                <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-300/90 flex items-start gap-2">
-                  <Info className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
-                  <span>
-                    Enter cost in <strong>today's dollars</strong>. The simulation engine automatically applies inflation to scale this outlay for calendar year {itemTargetYear || simStartYear}.
-                  </span>
-                </div>
-              )}
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Description / Notes (Optional)</label>
+                <input
+                  type="text"
+                  value={itemDescription}
+                  onChange={(e) => setItemDescription(e.target.value)}
+                  placeholder="e.g. HOA fee covers lawn maintenance and trash"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500/50"
+                />
+              </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
               <button
                 onClick={() => setItemModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800/60 rounded-lg cursor-pointer"
+                className="px-3.5 py-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800 rounded-lg"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSaveItem}
-                className="px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer shadow"
+                className="px-4 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg shadow-sm"
               >
-                {editingItem ? 'Save Changes' : 'Create Item'}
+                Save Item
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* MODAL 2: ADD / RENAME CATEGORY MODAL */}
-      {/* ========================================================================= */}
-      {categoryModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
-          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h4 className="text-sm font-bold text-slate-100">
-                {editingCategoryName ? 'Rename Category' : 'Create New Category'}
+      {/* MODAL 2: ADD STATE */}
+      {addStateModalOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-emerald-400" /> Add State to Plan
               </h4>
+              <button onClick={() => setAddStateModalOpen(false)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {addStateError && (
+              <div className="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+                {addStateError}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs text-slate-300 font-semibold mb-1">State Code (2 Letters)</label>
+              <input
+                type="text"
+                maxLength={2}
+                value={newStateCode}
+                onChange={(e) => setNewStateCode(e.target.value.toUpperCase())}
+                placeholder="e.g. NC, TX, PA, SC"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 font-mono font-bold text-center text-sm uppercase focus:outline-none focus:border-emerald-500/50"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
               <button
-                onClick={() => setCategoryModalOpen(false)}
-                className="text-slate-400 hover:text-slate-100 cursor-pointer"
+                onClick={() => setAddStateModalOpen(false)}
+                className="px-3.5 py-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800 rounded-lg"
               >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddState}
+                className="px-4 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg shadow-sm"
+              >
+                Add State
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: COPY STATE COSTS */}
+      {copyCostsModalOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Copy className="w-4 h-4 text-emerald-400" /> Copy State Costs
+              </h4>
+              <button onClick={() => setCopyCostsModalOpen(false)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Quickly clone all line item dollar figures from one state into another.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Source State</label>
+                <select
+                  value={copySourceState}
+                  onChange={(e) => setCopySourceState(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50"
+                >
+                  {statesList.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Target State</label>
+                <select
+                  value={copyTargetState}
+                  onChange={(e) => setCopyTargetState(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50"
+                >
+                  {statesList.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setCopyCostsModalOpen(false)}
+                className="px-3.5 py-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExecuteCopyStateCosts}
+                className="px-4 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg shadow-sm"
+              >
+                Copy {copySourceState} → {copyTargetState}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: CATEGORY ADD / EDIT */}
+      {categoryModalOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <FolderPlus className="w-4 h-4 text-emerald-400" />
+                {editingCategoryName ? 'Rename Category' : 'Add New Category'}
+              </h4>
+              <button onClick={() => setCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-200">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {categoryError && (
-              <div className="p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{categoryError}</span>
+              <div className="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+                {categoryError}
               </div>
             )}
 
-            <div className="text-xs">
-              <label className="block text-slate-300 font-semibold mb-1">Category Name</label>
+            <div>
+              <label className="block text-xs text-slate-300 font-semibold mb-1">Category Name *</label>
               <input
                 type="text"
                 value={newCategoryName}
-                onChange={(e) => {
-                  setNewCategoryName(e.target.value);
-                  if (categoryError) setCategoryError(null);
-                }}
-                placeholder="e.g. Leisure, Personal Care, Hobbies"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
+                onChange={(e) => setNewCategoryName(e.target.value)}
+                placeholder="e.g. Travel & Leisure, Technology"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-emerald-500/50"
               />
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
               <button
                 onClick={() => setCategoryModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800/60 rounded-lg cursor-pointer"
+                className="px-3.5 py-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800 rounded-lg"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSaveCategory}
-                className="px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer shadow"
+                className="px-4 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg shadow-sm"
               >
-                {editingCategoryName ? 'Save Name' : 'Create Category'}
+                Save Category
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* MODAL 3: SAFE CATEGORY DELETION / REASSIGNMENT MODAL */}
-      {/* ========================================================================= */}
+      {/* MODAL 5: CATEGORY DELETE SAFE REASSIGNMENT */}
       {deleteCategoryTarget && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4">
-            <div className="flex items-center gap-2 text-amber-400 border-b border-slate-800 pb-3">
-              <AlertCircle className="w-5 h-5 shrink-0" />
-              <h4 className="text-sm font-bold text-slate-100">
-                Delete Category: "{deleteCategoryTarget}"
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h4 className="text-sm font-bold text-red-400 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400" /> Delete Category "{deleteCategoryTarget}"
               </h4>
+              <button onClick={() => setDeleteCategoryTarget(null)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
             <p className="text-xs text-slate-300">
-              This category contains{' '}
-              <strong className="text-amber-300">
-                {catalog.items.filter((i) => i.category === deleteCategoryTarget).length} line items
-              </strong>
-              . What would you like to do with these items?
+              This category contains active expense items. Would you like to reassign them to another category or delete all items?
             </p>
 
-            <div className="space-y-3 text-xs bg-slate-950 p-3 rounded-xl border border-slate-800">
-              <div>
-                <label className="block text-slate-400 font-semibold mb-1">
-                  Option 1: Reassign items to another category:
-                </label>
-                <select
-                  value={reassignCategoryTarget}
-                  onChange={(e) => setReassignCategoryTarget(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-emerald-500"
-                >
-                  {catalog.categories
-                    .filter((c) => c !== deleteCategoryTarget)
-                    .map((c) => (
-                      <option key={c} value={c}>
-                        Move to "{c}"
-                      </option>
-                    ))}
-                </select>
-              </div>
+            <div>
+              <label className="block text-xs text-slate-300 font-semibold mb-1">Reassign items to:</label>
+              <select
+                value={reassignCategoryTarget}
+                onChange={(e) => setReassignCategoryTarget(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50"
+              >
+                {catalog.categories
+                  .filter((c) => c !== deleteCategoryTarget)
+                  .map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+              </select>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 border-t border-slate-800">
+            <div className="flex justify-between items-center pt-3 border-t border-slate-800 text-xs">
               <button
                 onClick={() => handleConfirmCategoryDeletion('delete-all')}
-                className="px-3 py-2 text-xs font-bold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded-lg cursor-pointer"
+                className="px-3 py-1.5 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors"
               >
-                Delete Category & All Items
+                Delete All Items
               </button>
-
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setDeleteCategoryTarget(null)}
-                  className="px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800/60 rounded-lg cursor-pointer"
+                  className="px-3 py-1.5 text-slate-300 hover:text-slate-100 bg-slate-800 rounded-lg"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => handleConfirmCategoryDeletion('reassign')}
-                  className="px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg cursor-pointer shadow"
+                  className="px-4 py-1.5 font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg shadow-sm"
                 >
                   Reassign & Delete
                 </button>

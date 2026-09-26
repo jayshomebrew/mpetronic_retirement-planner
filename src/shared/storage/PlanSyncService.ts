@@ -210,6 +210,11 @@ class PlanSyncServiceSingleton {
   private applyRemotePlan(remote: RemotePlanDocument): void {
     if (typeof window === 'undefined') return;
 
+    if (this.autoSaveTimer) {
+      clearTimeout(this.autoSaveTimer);
+      this.autoSaveTimer = null;
+    }
+
     const normalizedInputs = {
       ...remote.inputs,
       isConfigured: true,
@@ -293,12 +298,14 @@ class PlanSyncServiceSingleton {
         return { action: 'uploaded' };
       }
 
-      // Case 3: Both have meaningful data -> Compare timestamps
+      // Case 3: Both have meaningful data -> Compare timestamps & version
       if (isRemoteMeaningful && isLocalMeaningful && remote && localInputs) {
         const remoteTime = new Date(remote.updatedAt).getTime();
         const localTime = localModifiedAt ? new Date(localModifiedAt).getTime() : 0;
+        const remoteVersion = Number(remote.version || 0);
+        const localVersion = Number((localInputs as unknown as Record<string, unknown>).version || 0);
 
-        if (remoteTime > localTime) {
+        if (remoteVersion > localVersion || remoteTime >= localTime) {
           this.applyRemotePlan(remote);
           this.isSyncing = false;
           this.notify();

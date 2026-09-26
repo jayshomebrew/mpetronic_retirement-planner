@@ -23,7 +23,7 @@ const GROUP_COLORS: Record<string, string> = {
   Other: '#8b5cf6', // purple
 };
 
-export function getPlannerExpenseCatalog(): PlannerExpenseLineItem[] {
+export function getPlannerExpenseCatalog(activeState?: string): PlannerExpenseLineItem[] {
   const lineItems: PlannerExpenseLineItem[] = [];
   const seenIds = new Set<string>();
 
@@ -33,15 +33,26 @@ export function getPlannerExpenseCatalog(): PlannerExpenseLineItem[] {
       const raw = window.localStorage.getItem('retirement_planner_inputs');
       if (raw) {
         const parsed = JSON.parse(raw);
-        const detailed = parsed.detailedExpenses;
+        const detailed = normalizeDetailedExpenses(parsed.detailedExpenses);
+        const currentResState = activeState || parsed.jurisdiction?.currentState || 'MD';
+
         if (detailed && detailed.catalog && Array.isArray(detailed.catalog.items) && detailed.catalog.items.length > 0) {
+          const stateCosts = detailed.costs?.[currentResState] || {};
+          const allCosts = detailed.costs?.['ALL'] || {};
           const costsMD = detailed.costs?.MD || detailed.MD || {};
           const costsFL = detailed.costs?.FL || detailed.FL || {};
           const frequencies = detailed.frequencies || {};
 
           for (const item of detailed.catalog.items) {
+            // Check state applicability if activeState is specified or derived
+            const applies = !item.applicableStates || 
+              item.applicableStates.includes('ALL') || 
+              item.applicableStates.includes(currentResState);
+            
+            if (!applies) continue;
+
             const group = item.category || 'Living';
-            const cost = costsMD[item.id] ?? costsFL[item.id] ?? 0;
+            const cost = stateCosts[item.id] ?? allCosts[item.id] ?? costsMD[item.id] ?? costsFL[item.id] ?? 0;
             const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
             const monthlyCost = freq > 0 ? (cost * freq) / 12 : cost;
 
@@ -73,6 +84,7 @@ export function savePlannerExpenseLineItem(item: {
   name: string;
   groupCategory: string;
   plannedMonthlyDefault?: number;
+  applicableStates?: string[];
 }): PlannerExpenseLineItem | null {
   if (typeof window === 'undefined') return null;
   try {
@@ -105,16 +117,21 @@ export function savePlannerExpenseLineItem(item: {
         defaultFrequency: 12,
         isOneTime: false,
         targetYear: null,
+        applicableStates: item.applicableStates || ['ALL'],
       };
       norm.catalog.items.push(newItem);
       existing = newItem;
+    } else if (item.applicableStates) {
+      existing.applicableStates = item.applicableStates;
     }
 
     // Set frequencies and costs
     norm.frequencies[itemId] = 12;
     norm.costs = norm.costs || {};
+    norm.costs.ALL = norm.costs.ALL || {};
     norm.costs.MD = norm.costs.MD || {};
     norm.costs.FL = norm.costs.FL || {};
+    norm.costs.ALL[itemId] = monthlyCost;
     norm.costs.MD[itemId] = monthlyCost;
     norm.costs.FL[itemId] = monthlyCost;
     norm.MD = norm.costs.MD;
@@ -216,7 +233,8 @@ export function mergeWithCustomCategories(
 export async function syncPlannerCatalogToCloudStorage(
   detailedExpenses: DetailedExpensesState | null | undefined,
   adapter: StorageAdapter,
-  profileNames?: { primaryName: string; spouseName: string; isSingleFiler: boolean }
+  profileNames?: { primaryName: string; spouseName: string; isSingleFiler: boolean },
+  activeState?: string
 ): Promise<void> {
   // Sync profiles if provided
   if (profileNames) {
@@ -237,13 +255,17 @@ export async function syncPlannerCatalogToCloudStorage(
   if (!detailedExpenses || !detailedExpenses.catalog || !Array.isArray(detailedExpenses.catalog.items)) {
     return;
   }
-  const costsMD = detailedExpenses.costs?.MD || detailedExpenses.MD || {};
-  const costsFL = detailedExpenses.costs?.FL || detailedExpenses.FL || {};
-  const frequencies = detailedExpenses.frequencies || {};
+  const norm = normalizeDetailedExpenses(detailedExpenses);
+  const state = activeState || 'MD';
+  const stateCosts = norm.costs?.[state] || {};
+  const allCosts = norm.costs?.['ALL'] || {};
+  const costsMD = norm.costs?.MD || norm.MD || {};
+  const costsFL = norm.costs?.FL || norm.FL || {};
+  const frequencies = norm.frequencies || {};
 
-  for (const item of detailedExpenses.catalog.items) {
+  for (const item of norm.catalog.items) {
     const group = item.category || 'Living';
-    const cost = costsMD[item.id] ?? costsFL[item.id] ?? 0;
+    const cost = stateCosts[item.id] ?? allCosts[item.id] ?? costsMD[item.id] ?? costsFL[item.id] ?? 0;
     const freq = frequencies[item.id] ?? item.defaultFrequency ?? 12;
     const monthlyCost = freq > 0 ? (cost * freq) / 12 : cost;
     const displayName = `${group} - ${item.name}`;

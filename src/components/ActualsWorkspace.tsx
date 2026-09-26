@@ -32,12 +32,10 @@ import {
   Smartphone,
   ExternalLink,
   Tag,
-  Cloud,
 } from 'lucide-react';
 import { getStorageAdapter } from '../shared/storage';
 import { ActualExpense } from '../shared/types/expenses';
 import { AuthService } from '../shared/auth/AuthService';
-import { CloudAuthModal } from './CloudAuthModal';
 import { RangeSlider } from './RangeSlider';
 import { Chart } from 'react-chartjs-2';
 import { Chart as ChartJS, registerables } from 'chart.js';
@@ -95,8 +93,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<number | null>(null);
   const [showExpenseTable, setShowExpenseTable] = useState<boolean>(true);
   const [showTransactionsDrawer, setShowTransactionsDrawer] = useState<boolean>(false);
-  const [showCloudModal, setShowCloudModal] = useState<boolean>(false);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
+  const [, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
 
   const loadLoggedExpenses = useCallback(async () => {
     setIsLoadingExpenses(true);
@@ -184,25 +181,38 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
     if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
       const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
-      const stateCosts = norm.costs[inputs.jurisdiction.currentState] || norm.costs.MD || {};
+      const activeStateForYear = (inputs.jurisdiction.relocationYear !== null && selectedYear >= inputs.jurisdiction.relocationYear)
+        ? inputs.jurisdiction.targetState
+        : inputs.jurisdiction.currentState;
+      const stateCosts = norm.costs[activeStateForYear] || norm.costs.ALL || norm.costs[inputs.jurisdiction.currentState] || {};
       const freqs = norm.frequencies;
 
       for (const catItem of norm.catalog.items) {
         if (catItem.isOneTime && catItem.targetYear !== selectedYear) continue;
 
-        const cost = stateCosts[catItem.id] ?? 0;
+        const appliesToActiveState = !catItem.applicableStates ||
+          catItem.applicableStates.includes('ALL') ||
+          catItem.applicableStates.includes(activeStateForYear);
+
+        const actualEntry = actualsSummary.byLineItem[catItem.id];
+        const actualAmount = actualEntry?.total || 0;
+
+        // Clean declutter: Hide line item completely if not applicable to current active state and has zero actual spend
+        if (!appliesToActiveState && actualAmount === 0) {
+          continue;
+        }
+
+        const cost = appliesToActiveState ? (stateCosts[catItem.id] ?? 0) : 0;
         const freq = freqs[catItem.id] ?? catItem.defaultFrequency ?? 12;
         const plannedFullYear = catItem.isOneTime ? cost : cost * freq;
         const plannedAmount = selectedMonthFilter ? cost * (freq / 12) : plannedFullYear;
 
-        const actualEntry = actualsSummary.byLineItem[catItem.id];
-        const actualAmount = actualEntry?.total || 0;
         const variance = plannedAmount - actualAmount;
         const percentUsed = plannedAmount > 0 ? (actualAmount / plannedAmount) * 100 : actualAmount > 0 ? 999 : 0;
 
         items.push({
           id: catItem.id,
-          name: catItem.name,
+          name: !appliesToActiveState ? `${catItem.name} (Unbudgeted in ${activeStateForYear})` : catItem.name,
           group: catItem.category || 'Living',
           plannedAnnual: plannedAmount,
           actualAnnual: actualAmount,
@@ -233,7 +243,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     }
 
     return items.sort((a, b) => b.actualAnnual - a.actualAnnual);
-  }, [inputs.useDetailedExpenses, inputs.detailedExpenses, inputs.jurisdiction.currentState, selectedYear, selectedMonthFilter, actualsSummary]);
+  }, [inputs.useDetailedExpenses, inputs.detailedExpenses, inputs.jurisdiction.currentState, inputs.jurisdiction.targetState, inputs.jurisdiction.relocationYear, selectedYear, selectedMonthFilter, actualsSummary]);
 
   // Sync actual logged expenses into activeRecord living expenses
   const handleSyncActualsToRecord = () => {
@@ -821,22 +831,6 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           </div>
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
-            {/* Cloud Sync Button */}
-            <button
-              type="button"
-              onClick={() => setShowCloudModal(true)}
-              className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm ${
-                isAuthenticated
-                  ? 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border-emerald-500/40'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 border-slate-700'
-              }`}
-              title={isAuthenticated ? 'Household Cloud Connected & Synced' : 'Connect Household Cloud'}
-            >
-              <Cloud className="w-3.5 h-3.5" />
-              <span>{isAuthenticated ? 'Cloud Synced' : 'Connect Cloud'}</span>
-              {isAuthenticated && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />}
-            </button>
-
             <button
               onClick={() => loadLoggedExpenses()}
               disabled={isLoadingExpenses}
@@ -1752,12 +1746,6 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           </div>
         </div>
       )}
-      {/* Cloud Authentication Modal */}
-      <CloudAuthModal
-        isOpen={showCloudModal}
-        onClose={() => setShowCloudModal(false)}
-        onSyncComplete={loadLoggedExpenses}
-      />
     </div>
   );
 };

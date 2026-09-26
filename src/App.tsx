@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useDeferredValue } from 'react';
+import { useState, useEffect, useMemo, useDeferredValue, useRef } from 'react';
 import {
   AppStateInputs,
   LockedReturnSequence,
@@ -360,7 +360,12 @@ function App() {
   }, []);
 
   // Debounced auto-save to cloud DynamoDB whenever plan inputs, survivor toggle, or saved plans change
+  const isInitialAutoSaveMount = useRef(true);
   useEffect(() => {
+    if (isInitialAutoSaveMount.current) {
+      isInitialAutoSaveMount.current = false;
+      return;
+    }
     if (!isDemoMode && isAuthenticated && inputs.isConfigured) {
       PlanSyncService.scheduleAutoSave({ ...inputs, simulateSurvivor }, savedPlans);
     }
