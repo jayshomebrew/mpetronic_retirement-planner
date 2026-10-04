@@ -15,6 +15,7 @@ import {
   getSimulationStartYear,
 } from '../types';
 import { runRetirementSimulation } from '../engine/simulationEngine';
+import { NumericInput } from './NumericInput';
 
 interface CustomRothScenarioModalProps {
   isOpen: boolean;
@@ -365,16 +366,16 @@ export const CustomRothScenarioModal: React.FC<CustomRothScenarioModalProps> = (
                           {inputs.isSingleFiler ? `Age ${ages.yourAge}` : `Ages ${ages.yourAge} / ${ages.wifeAge}`}
                         </td>
                         <td className="py-2 px-3 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <span className="text-slate-500 font-bold">$</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="5000"
-                              value={amount === 0 ? '' : amount}
-                              onChange={(e) => handleUpdateAmount(yr, Number(e.target.value))}
+                          <div className="flex items-center justify-end">
+                            <NumericInput
+                              prefix="$"
+                              min={0}
+                              step={5000}
+                              value={amount}
+                              onChange={(val) => handleUpdateAmount(yr, val || 0)}
                               placeholder="0"
-                              className={`w-32 bg-slate-900 border rounded-lg px-2.5 py-1 text-right text-xs font-bold font-mono focus:outline-none ${
+                              wrapperClassName="w-32"
+                              className={`text-right text-xs font-bold font-mono ${
                                 isCapped
                                   ? 'border-amber-500/60 text-amber-300 focus:border-amber-400'
                                   : 'border-slate-800 text-purple-300 focus:border-purple-400'

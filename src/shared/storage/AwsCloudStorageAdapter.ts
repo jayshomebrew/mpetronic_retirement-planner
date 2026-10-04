@@ -1,4 +1,4 @@
-import { ActualExpense, ExpenseCategory, FullHouseholdArchive, StorageAdapter } from '../types/expenses';
+import { ActualExpense, ExpenseCategory, FullHouseholdArchive, StorageAdapter, SyncStatus } from '../types/expenses';
 import { IndexedDbStorageAdapter } from './IndexedDbStorageAdapter';
 import { AuthService } from '../auth/AuthService';
 import { getCloudConfig } from '../auth/config';
@@ -210,16 +210,72 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     return saved;
   }
 
+  async saveExpensesBatch(
+    expenses: Array<
+      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
+        expenseId?: string;
+        createdAt?: string;
+        updatedAt?: string;
+        syncStatus?: SyncStatus;
+      }
+    >
+  ): Promise<ActualExpense[]> {
+    if (expenses.length === 0) return [];
+
+    // 1. Write entire batch to local IndexedDB in a single transaction
+    const saved = this.localAdapter.saveExpensesBatch
+      ? await this.localAdapter.saveExpensesBatch(expenses)
+      : await Promise.all(expenses.map(e => this.localAdapter.saveExpense(e)));
+
+    // 2. Push pending queue to cloud ONCE after entire batch is safely written
+    if (typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {
+      this.flushPendingExpenses().catch(err => {
+        console.warn('Background batch pending expenses flush failed:', err);
+      });
+    }
+
+    return saved;
+  }
+
+  async getExpenseById(id: string): Promise<ActualExpense | null> {
+    if (this.localAdapter.getExpenseById) {
+      return this.localAdapter.getExpenseById(id);
+    }
+    return null;
+  }
+
   async updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense> {
+    const existing = this.localAdapter.getExpenseById ? await this.localAdapter.getExpenseById(id) : null;
+    const dateChangedMonthOrYear = Boolean(
+      existing && updates.date && existing.date.slice(0, 7) !== updates.date.slice(0, 7)
+    );
+
     const updated = await this.localAdapter.updateExpense(id, {
       ...updates,
       syncStatus: 'PENDING_SYNC',
     });
 
     if (typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {
-      this.flushPendingExpenses().catch(err => {
+      // If date changed year or month, delete the old remote item with the old sort key from DynamoDB
+      if (dateChangedMonthOrYear) {
+        try {
+          const headers = await this.getAuthHeaders();
+          if (headers) {
+            await fetch(`${this.getApiEndpoint()}/api/expenses/${encodeURIComponent(id)}`, {
+              method: 'DELETE',
+              headers,
+            });
+          }
+        } catch (err) {
+          console.warn('Failed to delete old remote expense during date move:', err);
+        }
+      }
+
+      try {
+        await this.flushPendingExpenses();
+      } catch (err) {
         console.warn('Background update expense sync failed:', err);
-      });
+      }
     }
 
     return updated;

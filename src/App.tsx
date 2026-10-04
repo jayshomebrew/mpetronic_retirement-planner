@@ -40,7 +40,7 @@ import { LandingPage } from './components/LandingPage';
 import { NotFoundPage } from './components/NotFoundPage';
 import { AuthService } from './shared/auth/AuthService';
 import { getStorageAdapter, PlanSyncService } from './shared/storage';
-import { syncPlannerCatalogToCloudStorage } from './shared/utils/plannerCategories';
+import { syncPlannerCatalogToCloudStorage, syncCustomCategoriesToPlanner } from './shared/utils/plannerCategories';
 import { SAMPLE_DEMO_PLAN } from './shared/utils/sampleDemoPlan';
 import { isLocalhostEnvironment, resolveAppMode } from './shared/utils/appMode';
 
@@ -90,9 +90,9 @@ const DEFAULT_INPUTS: AppStateInputs = {
     relocationYear: null,
   },
   growthAssumptions: {
-    equityReturnRate: 0.07,
-    fixedIncomeReturnRate: 0.04,
-    cpiInflationRate: 0.025,
+    equityReturnRate: 0.068,
+    fixedIncomeReturnRate: 0.046,
+    cpiInflationRate: 0.024,
     healthcareInflationRate: 0.05,
     preTaxEquityPortion: 0.60,
     taxableEquityPortion: 0.80,
@@ -109,8 +109,8 @@ const DEFAULT_INPUTS: AppStateInputs = {
   rothConversionTargetValue: null,
   monteCarloSettings: {
     mode: 'monte-carlo',
-    equityVolatility: 0.15,
-    fixedIncomeVolatility: 0.05,
+    equityVolatility: 0.160,
+    fixedIncomeVolatility: 0.055,
     correlation: 0.15,
     trials: 1000,
     seed: null,
@@ -119,6 +119,10 @@ const DEFAULT_INPUTS: AppStateInputs = {
     enableRegimeSwitching: true,
     historicalSamplingStrategy: 'hybrid',
     calibrateHistoricalMeans: true,
+    enableHistoricalStudentT: false,
+    activeCmaProfileId: 'vanguard-2026',
+    baseCmaProfileId: 'vanguard-2026',
+    customCmaProfiles: [],
     stressTest: {
       enabled: false,
       mode: 'absolute',
@@ -347,7 +351,7 @@ function App() {
       setIsPlanSyncing(status.isSyncing);
     });
 
-    if (AuthService.isAuthenticated()) {
+    if (AuthService.isAuthenticated() && !isLocalhostEnvironment() && !isDemoMode) {
       PlanSyncService.syncPlanNow().catch((err) => {
         console.warn('Initial mount plan cloud sync failed:', err);
       });
@@ -357,7 +361,7 @@ function App() {
       unsubAuth();
       unsubSync();
     };
-  }, []);
+  }, [isDemoMode]);
 
   // Debounced auto-save to cloud DynamoDB whenever plan inputs, survivor toggle, or saved plans change
   const isInitialAutoSaveMount = useRef(true);
@@ -366,14 +370,14 @@ function App() {
       isInitialAutoSaveMount.current = false;
       return;
     }
-    if (!isDemoMode && isAuthenticated && inputs.isConfigured) {
+    if (!isDemoMode && !isLocalhostEnvironment() && isAuthenticated && inputs.isConfigured) {
       PlanSyncService.scheduleAutoSave({ ...inputs, simulateSurvivor }, savedPlans);
     }
   }, [inputs, savedPlans, isAuthenticated, simulateSurvivor, isDemoMode]);
 
   // Automatically sync planner line items & profile names to cloud DynamoDB when authenticated or when inputs change
   useEffect(() => {
-    if (!isDemoMode && activeInputs.detailedExpenses && activeInputs.detailedExpenses.catalog) {
+    if (!isDemoMode && !isLocalhostEnvironment() && isAuthenticated && activeInputs.detailedExpenses && activeInputs.detailedExpenses.catalog) {
       const adapter = getStorageAdapter();
       const profileNames = {
         primaryName: activeInputs.you?.name || 'Primary',
@@ -385,6 +389,38 @@ function App() {
       });
     }
   }, [activeInputs.detailedExpenses, activeInputs.you?.name, activeInputs.wife?.name, activeInputs.isSingleFiler, isAuthenticated, isDemoMode]);
+
+  // Pull and synchronize custom categories from storage (e.g. created in Expenser app) into Detailed Expenses
+  useEffect(() => {
+    if (isDemoMode) return;
+    const syncCategoriesFromStorage = async () => {
+      try {
+        const adapter = getStorageAdapter();
+        const cats = await adapter.getCategories();
+        if (cats && cats.length > 0) {
+          syncCustomCategoriesToPlanner(cats);
+        }
+      } catch (err) {
+        console.warn('Failed to pull categories from storage to planner:', err);
+      }
+    };
+
+    syncCategoriesFromStorage();
+
+    const handleSyncEvent = () => {
+      syncCategoriesFromStorage();
+    };
+
+    window.addEventListener('cloud_categories_synced', handleSyncEvent);
+    window.addEventListener('cloud_sync_completed', handleSyncEvent);
+    window.addEventListener('cloud_expenses_synced', handleSyncEvent);
+
+    return () => {
+      window.removeEventListener('cloud_categories_synced', handleSyncEvent);
+      window.removeEventListener('cloud_sync_completed', handleSyncEvent);
+      window.removeEventListener('cloud_expenses_synced', handleSyncEvent);
+    };
+  }, [isDemoMode, isAuthenticated]);
 
   const handleOpenDocumentation = (sectionId?: string) => {
     setDocumentationSectionId(sectionId || 'overview');
@@ -399,7 +435,7 @@ function App() {
     }
   };
 
-  // Synchronize inputs while seamlessly restoring simulateSurvivor if present in imported/loaded plan
+  // Synchronize inputs while seamlessly restoring simulateSurvivor and savedPlans if present in imported/loaded plan
   const handleInputsChange = (newInputs: AppStateInputs | ((prev: AppStateInputs) => AppStateInputs)) => {
     if (isDemoMode) {
       if (typeof newInputs === 'function') {
@@ -408,11 +444,17 @@ function App() {
           if (typeof next.simulateSurvivor === 'boolean') {
             setSimulateSurvivor(next.simulateSurvivor);
           }
+          if (Array.isArray((next as { savedPlans?: SavedPlan[] }).savedPlans)) {
+            setSavedPlans((next as { savedPlans?: SavedPlan[] }).savedPlans!);
+          }
           return next;
         });
       } else {
         if (typeof newInputs.simulateSurvivor === 'boolean') {
           setSimulateSurvivor(newInputs.simulateSurvivor);
+        }
+        if (Array.isArray((newInputs as { savedPlans?: SavedPlan[] }).savedPlans)) {
+          setSavedPlans((newInputs as { savedPlans?: SavedPlan[] }).savedPlans!);
         }
         setDemoInputs(newInputs);
       }
@@ -425,11 +467,17 @@ function App() {
         if (typeof next.simulateSurvivor === 'boolean') {
           setSimulateSurvivor(next.simulateSurvivor);
         }
+        if (Array.isArray((next as { savedPlans?: SavedPlan[] }).savedPlans)) {
+          setSavedPlans((next as { savedPlans?: SavedPlan[] }).savedPlans!);
+        }
         return next;
       });
     } else {
       if (typeof newInputs.simulateSurvivor === 'boolean') {
         setSimulateSurvivor(newInputs.simulateSurvivor);
+      }
+      if (Array.isArray((newInputs as { savedPlans?: SavedPlan[] }).savedPlans)) {
+        setSavedPlans((newInputs as { savedPlans?: SavedPlan[] }).savedPlans!);
       }
       setInputs(newInputs);
     }
@@ -497,7 +545,7 @@ function App() {
   );
 
   // Persisted plan selections for Workspace 4 comparison
-  const [selectedPlanAId, setSelectedPlanAId] = useLocalStorage<string>('retirement_planner_selected_plan_a', '');
+  const [selectedPlanAId, setSelectedPlanAId] = useLocalStorage<string>('retirement_planner_selected_plan_a', 'current');
   const [selectedPlanBId, setSelectedPlanBId] = useLocalStorage<string>('retirement_planner_selected_plan_b', '');
 
   // Persisted Quick Fill selection for Workspace 2 Roth optimization
@@ -541,6 +589,7 @@ function App() {
     const enableRegimeSwitching = deferredInputs.monteCarloSettings?.enableRegimeSwitching !== false;
     const historicalStrategy = deferredInputs.monteCarloSettings?.historicalSamplingStrategy ?? 'hybrid';
     const calibrateHistoricalMeans = deferredInputs.monteCarloSettings?.calibrateHistoricalMeans !== false;
+    const enableHistoricalStudentT = deferredInputs.monteCarloSettings?.enableHistoricalStudentT === true;
 
     const baseSeed = seed !== null && seed !== undefined ? seed : 12345;
     const rand = mulberry32(baseSeed + nonce);
@@ -549,6 +598,7 @@ function App() {
     for (let t = 0; t < trials; t++) {
       if (mode === 'historical') {
         const isBlock = historicalStrategy === 'block' ? true : historicalStrategy === 'random' ? false : rand() < 0.35;
+        const targetCpi = deferredInputs.growthAssumptions.cpiInflationRate;
         list.push(
           generateHistoricalSequence(
             isBlock,
@@ -558,10 +608,13 @@ function App() {
             constantCpi,
             calibrateHistoricalMeans,
             equityMean,
-            bondMean
+            bondMean,
+            targetCpi,
+            enableHistoricalStudentT
           )
         );
       } else {
+        const targetCpi = deferredInputs.growthAssumptions.cpiInflationRate;
         list.push(
           generateSyntheticSequence(
             equityMean,
@@ -572,7 +625,8 @@ function App() {
             rand,
             isCpiRandomized,
             constantCpi,
-            enableRegimeSwitching
+            enableRegimeSwitching,
+            targetCpi
           )
         );
       }
@@ -594,6 +648,7 @@ function App() {
     deferredInputs.monteCarloSettings.enableRegimeSwitching,
     deferredInputs.monteCarloSettings.historicalSamplingStrategy,
     deferredInputs.monteCarloSettings.calibrateHistoricalMeans,
+    deferredInputs.monteCarloSettings.enableHistoricalStudentT,
   ]);
 
   // 2. Compute representative market return sequences (P10, P50, P90) instantaneously (<0.1ms).
@@ -892,6 +947,8 @@ function App() {
             setSimulateSurvivor={setSimulateSurvivor}
             ledger={displayActiveLedger}
             globalScenario={globalScenario}
+            savedPlans={savedPlans}
+            onSavePlans={setSavedPlans}
           />
         )}
 
@@ -947,6 +1004,7 @@ function App() {
             globalScenario={globalScenario}
             useTodayDollars={useTodayDollars}
             setUseTodayDollars={setUseTodayDollars}
+            onOpenDocumentation={handleOpenDocumentation}
           />
         )}
 
@@ -963,6 +1021,9 @@ function App() {
             setSelectedPlanAId={setSelectedPlanAId}
             selectedPlanBId={selectedPlanBId}
             setSelectedPlanBId={setSelectedPlanBId}
+            ledger={displayActiveLedger}
+            activeSequence={activeSequence}
+            globalScenario={globalScenario}
           />
         )}
 
@@ -990,6 +1051,12 @@ function App() {
               }));
             }}
             onNavigateToTab={(tabIdx) => handleNavigate(tabIdx)}
+            onUpdatePriorTaxReturnMAGI={(priorMAGI) => {
+              handleInputsChange((prev) => ({
+                ...prev,
+                priorTaxReturnMAGI: priorMAGI,
+              }));
+            }}
           />
         )}
 

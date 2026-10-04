@@ -84,6 +84,10 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
     return healthcareConfig?.fileSSA44LifeChangingEvent !== false;
   });
 
+  const [coveredByWorkingSpousePlan, setCoveredByWorkingSpousePlan] = useState<boolean>(() => {
+    return Boolean(healthcareConfig?.coveredByWorkingSpousePlan);
+  });
+
   const [medicareStartMode, setMedicareStartMode] = useState<'age65' | 'customDate'>(() => {
     return healthcareConfig?.medicareStartMode ?? 'age65';
   });
@@ -116,6 +120,7 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
       fileSSA44LifeChangingEvent: fileSSA44,
       medicareStartMode,
       medicareStartDate: medicareStartMode === 'customDate' ? (medicareStartDate || null) : null,
+      coveredByWorkingSpousePlan,
       MD: mdConfig,
       FL: flConfig
     });
@@ -598,6 +603,23 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
                 </span>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
                   Upon retirement, beneficiaries file Form SSA-44 to request that Social Security calculate Medicare IRMAA surcharges using their <strong>current post-retirement income</strong> rather than their high pre-retirement W-2 wages from 2 years prior.
+                </p>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 cursor-pointer group pt-2 border-t border-slate-850">
+              <input
+                type="checkbox"
+                checked={coveredByWorkingSpousePlan}
+                onChange={(e) => setCoveredByWorkingSpousePlan(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500/40 focus:ring-offset-0 transition-all cursor-pointer"
+              />
+              <div className="space-y-1">
+                <span className="text-xs font-bold text-slate-200 group-hover:text-emerald-400 transition-colors block">
+                  Covered under working spouse's employer health plan
+                </span>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Individual pre-65 health premiums and out-of-pocket costs will remain $0 while primary spouse is actively employed, beginning only after primary spouse's retirement.
                 </p>
               </div>
             </label>

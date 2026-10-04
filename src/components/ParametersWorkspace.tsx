@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   AppStateInputs,
+  SavedPlan,
   SimulationResultRow,
   getSimulationStartYear,
   normalizeDetailedExpenses,
@@ -45,16 +46,21 @@ interface ParametersWorkspaceProps {
   setSimulateSurvivor: (val: boolean) => void;
   ledger: SimulationResultRow[];
   globalScenario: 'flat' | 'p10' | 'p50' | 'p90';
+  savedPlans?: SavedPlan[];
+  onSavePlans?: (plans: SavedPlan[] | ((prev: SavedPlan[]) => SavedPlan[])) => void;
 }
 
 export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
   activeSection,
+  onNavigateSection,
   inputs,
   onChange,
   onReset,
   simulateSurvivor,
   setSimulateSurvivor,
   ledger,
+  savedPlans = [],
+  onSavePlans,
 }) => {
   const [isEditingYouName, setIsEditingYouName] = useState(false);
   const [tempYouName, setTempYouName] = useState(inputs.you.name || '');
@@ -183,7 +189,7 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
       try {
         const text = event.target?.result as string;
         if (!text) return;
-        const parsed = JSON.parse(text) as AppStateInputs;
+        const parsed = JSON.parse(text) as AppStateInputs & { savedPlans?: SavedPlan[] };
 
         if (
           parsed &&
@@ -198,6 +204,9 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
           };
           if (typeof parsed.simulateSurvivor === 'boolean') {
             setSimulateSurvivor(parsed.simulateSurvivor);
+          }
+          if (Array.isArray(parsed.savedPlans) && onSavePlans) {
+            onSavePlans(parsed.savedPlans);
           }
           onChange(cleaned);
         } else {
@@ -1495,6 +1504,13 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
           simStartYear={simStartYear}
           detailedExpenses={inputs.detailedExpenses}
           onSave={(expenses) => updateNestedState('detailedExpenses', '', expenses)}
+          youHealthcare={inputs.you.healthcare}
+          wifeHealthcare={inputs.wife.healthcare}
+          isSingleFiler={inputs.isSingleFiler}
+          onNavigateToHealthcare={() => {
+            setShowExpensesDialog(false);
+            onNavigateSection?.('params-healthcare');
+          }}
         />
       )}
 
@@ -1504,6 +1520,7 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
           onClose={() => setExportDialogFormat(null)}
           inputs={inputs}
           simulateSurvivor={simulateSurvivor}
+          savedPlans={savedPlans}
           ledger={ledger}
           initialFormat={exportDialogFormat}
         />

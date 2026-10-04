@@ -23,6 +23,7 @@ describe('PlanSyncService', () => {
     vi.stubGlobal('localStorage', storageObj);
     vi.stubGlobal('window', {
       localStorage: storageObj,
+      location: { hostname: 'app.myretirement.com' },
       dispatchEvent: vi.fn(),
     });
   });
@@ -81,13 +82,41 @@ describe('PlanSyncService', () => {
       isSingleFiler: false,
       useDetailedExpenses: false,
       charitySettings: DEFAULT_CHARITY_SETTINGS,
-      monteCarloSettings: { mode: 'monte-carlo', equityVolatility: 0.15, fixedIncomeVolatility: 0.05, correlation: 0.15, trials: 1000, seed: null },
+      monteCarloSettings: { 
+        mode: 'monte-carlo', 
+        equityVolatility: 0.155, 
+        fixedIncomeVolatility: 0.055, 
+        correlation: 0.15, 
+        trials: 1000, 
+        seed: null,
+        activeCmaProfileId: 'vanguard-2026',
+        baseCmaProfileId: 'vanguard-2026',
+        customCmaProfiles: [{
+          id: 'custom-imported-2027',
+          name: 'My Firm 2027',
+          institution: 'RIA',
+          editionYear: 2027,
+          horizon: '30-Year Secular',
+          isBuiltIn: false,
+          equityReturnRate: 0.07,
+          equityVolatility: 0.16,
+          fixedIncomeReturnRate: 0.045,
+          fixedIncomeVolatility: 0.055,
+          cashYieldRate: 0.035,
+          cpiInflationRate: 0.024,
+          correlation: 0.15,
+        }],
+      },
     };
 
     const result = await PlanSyncService.saveRemotePlan(mockInputs);
 
     expect(result).toBe(true);
     expect(mockFetch).toHaveBeenCalled();
+    const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(requestBody.inputs.monteCarloSettings.activeCmaProfileId).toBe('vanguard-2026');
+    expect(requestBody.inputs.monteCarloSettings.customCmaProfiles).toHaveLength(1);
+    expect(requestBody.inputs.monteCarloSettings.customCmaProfiles[0].id).toBe('custom-imported-2027');
   });
 
   it('correctly detects meaningful vs empty plan data', () => {

@@ -25,6 +25,7 @@ const MEDICARE_PART_D_2026 = 34.50;
 const MEDICARE_PART_B_DEDUCTIBLE_2026 = 283;
 
 export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProps> = ({
+  personKey,
   name,
   birthDate,
   birthYear,
@@ -90,6 +91,7 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
       fileSSA44LifeChangingEvent: healthcareConfig?.fileSSA44LifeChangingEvent !== false,
       medicareStartMode: healthcareConfig?.medicareStartMode ?? 'age65',
       medicareStartDate: healthcareConfig?.medicareStartDate ?? null,
+      coveredByWorkingSpousePlan: healthcareConfig?.coveredByWorkingSpousePlan ?? false,
       MD: healthcareConfig?.MD ? { ...healthcareConfig.MD } : createDefaultStateConfig(),
       FL: healthcareConfig?.FL ? { ...healthcareConfig.FL } : createDefaultStateConfig(),
     };
@@ -124,7 +126,7 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
     onChange(updated);
   };
 
-  const handleUniversalFieldChange = <K extends 'medicarePartBPremium' | 'fileSSA44LifeChangingEvent' | 'medicareStartMode' | 'medicareStartDate'>(
+  const handleUniversalFieldChange = <K extends 'medicarePartBPremium' | 'fileSSA44LifeChangingEvent' | 'medicareStartMode' | 'medicareStartDate' | 'coveredByWorkingSpousePlan'>(
     field: K,
     val: HealthcareConfig[K]
   ) => {
@@ -369,6 +371,34 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
               </h4>
             </div>
           </div>
+
+          {/* Working Spouse Coverage Checkbox */}
+          {personKey === 'wife' && (
+            <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-800/90 space-y-1.5">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={Boolean(currentConfig.coveredByWorkingSpousePlan)}
+                  onChange={(e) => handleUniversalFieldChange('coveredByWorkingSpousePlan', e.target.checked)}
+                  className="rounded border-slate-700 text-teal-500 focus:ring-teal-500 w-4 h-4 mt-0.5 cursor-pointer"
+                />
+                <div className="space-y-0.5">
+                  <span className="text-xs font-bold text-slate-200 block">
+                    Covered under working spouse's employer health plan
+                  </span>
+                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                    Spouse is covered under working partner's company health plan with $0 individual pre-65 premiums and out-of-pocket costs while primary is actively employed. Individual pre-65 health costs will begin the month following primary spouse's retirement.
+                  </p>
+                </div>
+              </label>
+              {currentConfig.coveredByWorkingSpousePlan && (
+                <div className="flex items-center gap-1.5 text-[10px] text-teal-400 font-semibold pl-6.5 pt-0.5">
+                  <Shield className="w-3 h-3" />
+                  <span>Individual Pre-65 costs will remain $0 while working spouse is employed</span>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">

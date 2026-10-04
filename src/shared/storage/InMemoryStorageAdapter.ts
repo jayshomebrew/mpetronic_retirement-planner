@@ -52,6 +52,11 @@ export class InMemoryStorageAdapter implements StorageAdapter {
       .slice(0, limit);
   }
 
+  async getExpenseById(id: string): Promise<ActualExpense | null> {
+    const found = this.expenses.find(e => e.expenseId === id);
+    return found || null;
+  }
+
   async saveExpense(
     expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
       expenseId?: string;
@@ -77,6 +82,23 @@ export class InMemoryStorageAdapter implements StorageAdapter {
       this.expenses.push(newRecord);
     }
     return newRecord;
+  }
+
+  async saveExpensesBatch(
+    expenses: Array<
+      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
+        expenseId?: string;
+        createdAt?: string;
+        updatedAt?: string;
+        syncStatus?: SyncStatus;
+      }
+    >
+  ): Promise<ActualExpense[]> {
+    const results: ActualExpense[] = [];
+    for (const exp of expenses) {
+      results.push(await this.saveExpense(exp));
+    }
+    return results;
   }
 
   async updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense> {

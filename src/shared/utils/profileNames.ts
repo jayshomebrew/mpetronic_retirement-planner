@@ -80,7 +80,7 @@ export function resolveLoggedInPayerName(): string {
     return profileNames.primaryName;
   }
 
-  // Extract a readable first name from email (e.g. markpetronic@gmail.com -> Mark)
+  // Extract a readable first name from email (e.g. user.name@example.com -> User)
   const prefix = email.split('@')[0];
   const namePart = prefix.split('.')[0];
   return namePart.charAt(0).toUpperCase() + namePart.slice(1);

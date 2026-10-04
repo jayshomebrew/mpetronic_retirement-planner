@@ -26,6 +26,7 @@ export interface HealthcareConfig {
   fileSSA44LifeChangingEvent?: boolean; // Form SSA-44 Life-Changing Event (Work Stoppage / Wage Reduction)
   medicareStartMode?: 'age65' | 'customDate'; // 'age65' (default) or 'customDate'
   medicareStartDate?: string | null; // YYYY-MM-DD or YYYY-MM when customDate mode is chosen
+  coveredByWorkingSpousePlan?: boolean; // Under-65 spouse covered under working spouse's employer health plan until primary retires
   MD: StateHealthcareConfig;
   FL: StateHealthcareConfig;
 }
@@ -79,6 +80,27 @@ export interface StressTestConfig {
   overrides: StressTestYearOverride[];
 }
 
+export interface CMAProfile {
+  id: string; // e.g. 'vanguard-2026', 'blackrock-2026', 'jpmorgan-2026', 'consensus-2026', 'custom'
+  name: string; // e.g. 'Vanguard VCMM'
+  institution: string; // e.g. 'Vanguard Investment Strategy Group'
+  editionYear: number; // e.g. 2026
+  horizon: string; // e.g. '30-Year Secular'
+  description?: string;
+  sourceUrl?: string;
+  isBuiltIn: boolean; // true for bundled, false for user-imported
+
+  // Asset return parameters (Geometric CAGR)
+  equityReturnRate: number;      // Stated 30-year geometric CAGR (e.g. 0.068 for 6.8%)
+  equityVolatility: number;      // Annual standard deviation (e.g. 0.160 for 16.0%)
+  fixedIncomeReturnRate: number; // Stated 30-year geometric CAGR (e.g. 0.046 for 4.6%)
+  fixedIncomeVolatility: number; // Annual standard deviation (e.g. 0.055 for 5.5%)
+  cashYieldRate: number;         // Money market / short-term cash yield (e.g. 0.035 for 3.5%)
+  cpiInflationRate: number;      // Secular headline CPI expected rate (e.g. 0.024 for 2.4%)
+  cpiVolatility?: number;        // Annual inflation standard deviation (default ~0.018)
+  correlation: number;           // Stock-Bond correlation coefficient (e.g. 0.15)
+}
+
 export interface MonteCarloSettings {
   mode: 'monte-carlo' | 'historical';
   equityVolatility: number;      // e.g. 0.15 (15%)
@@ -93,6 +115,10 @@ export interface MonteCarloSettings {
   enableRegimeSwitching?: boolean; // If true (default), apply Markov 2-state regime switching and Ornstein-Uhlenbeck mean reversion
   historicalSamplingStrategy?: 'hybrid' | 'block' | 'random'; // Historical bootstrap strategy (hybrid: 35% block / 65% random, block: 100% contiguous, random: 100% random resampled)
   calibrateHistoricalMeans?: boolean; // If true (default), calibrate historical return shocks to match user configured baseline means (e.g. 7% equity / 4% bond)
+  enableHistoricalStudentT?: boolean; // If true, apply Student-t fat-tail scaling (df=5) to historical bootstrap shocks. Only applicable in historical mode (not CMA/synthetic).
+  activeCmaProfileId?: string;   // e.g. 'vanguard-2026', 'consensus-2026', or 'custom'
+  baseCmaProfileId?: string | null; // Tracks parent preset if modified (e.g. 'vanguard-2026')
+  customCmaProfiles?: CMAProfile[]; // User imported/created profiles
 }
 
 export interface ExpenseItemDefinition {
@@ -104,6 +130,7 @@ export interface ExpenseItemDefinition {
   isOneTime?: boolean;
   targetYear?: number | null; // The specific year a one-time expense occurs (in today's dollars)
   applicableStates?: string[]; // ['ALL'] (default) or specific state codes (e.g. ['FL'], ['MD'])
+  dueMonths?: number[]; // Array of 1-based month numbers (1 to 12) when this non-monthly expense is due
 }
 
 export interface ExpenseCatalog {
@@ -354,8 +381,10 @@ export interface YearActualsRecord {
   // Realized expenses & inflows
   totalLivingExpenses?: number | null;
   categoryExpenses?: Record<string, number>;
+  healthcareOOP?: number | null; // Realized healthcare out-of-pocket (deductibles, co-pays, prescriptions)
   preMedicareHealthcareCost?: number | null;
   medicareBasePremiums?: number | null;
+  irmaaSurcharges?: number | null; // Realized Medicare IRMAA Part B & D surcharges paid
   earnedSalaryYou?: number | null;
   earnedSalaryWife?: number | null;
   charitableTithe?: number | null;
@@ -436,6 +465,7 @@ export interface AppStateInputs {
   actualTracking?: ActualTrackingState;
   guardrailSettings?: GuardrailSettings;
   bucketSettings?: BucketStrategySettings;
+  priorTaxReturnMAGI?: Record<number, number | null>; // Historical 2-year lookback tax return MAGI (e.g. 2024 for 2026, 2025 for 2027)
 }
 
 /**
@@ -500,6 +530,10 @@ export interface SimulationResultRow {
   
   // Expenses & Cashflow
   livingExpenses: number;
+  plannedBaseLivingExpenses?: number; // Base recurring living budget before OOP and one-time
+  plannedLivingExpenses?: number; // Total planned living expenses including healthcare OOP allowance
+  healthcareOOP?: number; // Realized or modeled healthcare OOP cost (deductibles, co-pays, coinsurance)
+  plannedHealthcareOOP?: number; // Maximum planned annual healthcare OOP ceiling / allowance
   medicareBasePremiums: number;
   preMedicareHealthcareCost: number; // Annual pre-Medicare healthcare premium expenses
   totalExpenses: number; // Expenses + Taxes + Medicare Base & Surcharges + Pre-Medicare Premium

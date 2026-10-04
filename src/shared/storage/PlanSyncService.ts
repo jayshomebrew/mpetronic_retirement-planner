@@ -1,6 +1,7 @@
 import { AuthService } from '../auth/AuthService';
 import { getCloudConfig } from '../auth/config';
 import { AppStateInputs, SavedPlan, CustomRothScenario, normalizeDetailedExpenses } from '../../types';
+import { isLocalhostEnvironment } from '../utils/appMode';
 
 export interface PlanSyncStatus {
   isSyncing: boolean;
@@ -93,7 +94,7 @@ class PlanSyncServiceSingleton {
    * Fetch the latest shared household plan from AWS DynamoDB.
    */
   public async fetchRemotePlan(): Promise<RemotePlanDocument | null> {
-    if (this.isDemoMode) return null;
+    if (this.isDemoMode || isLocalhostEnvironment()) return null;
     if (!AuthService.isAuthenticated()) return null;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
 
@@ -134,7 +135,7 @@ class PlanSyncServiceSingleton {
     savedPlans: SavedPlan[] = [],
     customScenarios: CustomRothScenario[] = []
   ): Promise<boolean> {
-    if (this.isDemoMode) return false;
+    if (this.isDemoMode || isLocalhostEnvironment()) return false;
     if (!AuthService.isAuthenticated()) return false;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
 
@@ -252,7 +253,7 @@ class PlanSyncServiceSingleton {
    * 4. If both have populated data: compares timestamps to resolve newer version.
    */
   public async syncPlanNow(): Promise<{ action: 'downloaded' | 'uploaded' | 'up-to-date'; updatedBy?: string }> {
-    if (this.isDemoMode) {
+    if (this.isDemoMode || isLocalhostEnvironment()) {
       return { action: 'up-to-date' };
     }
     if (!AuthService.isAuthenticated()) {
@@ -345,7 +346,7 @@ class PlanSyncServiceSingleton {
     savedPlans: SavedPlan[] = [],
     customScenarios: CustomRothScenario[] = []
   ): void {
-    if (this.isDemoMode) return;
+    if (this.isDemoMode || isLocalhostEnvironment()) return;
 
     if (typeof window !== 'undefined') {
       window.localStorage.setItem('retirement_planner_plan_local_modified_at', new Date().toISOString());

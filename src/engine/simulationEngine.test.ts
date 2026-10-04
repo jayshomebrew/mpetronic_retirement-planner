@@ -1713,6 +1713,218 @@ describe('runRetirementSimulation fixes', () => {
       expect(row2026?.actualSurplusGap).toBeGreaterThan(15000);
       expect(row2026?.permittedSpendingBonus).toBeLessThanOrEqual(15000.01); // Capped by upper guardrail ceiling ($115k - $100k = $15k)
     });
+
+    it('should compute Guardrail planned budget from detailed expenses when useDetailedExpenses is true', () => {
+      const inputs = getBaseActualsTestInputs();
+      inputs.guardrailSettings = {
+        enabled: true,
+        upperGuardrailPct: 0.15,
+        lowerGuardrailPct: 0.15,
+        marketSurplusSharePct: 0.10,
+        applyToSimulation: false,
+      };
+      // Stale flat budget from prior configuration
+      inputs.annualLivingExpenses = 54603;
+      inputs.useDetailedExpenses = true;
+      inputs.detailedExpenses = {
+        catalog: {
+          categories: ['Housing', 'Food'],
+          items: [
+            { id: 'rent', name: 'Rent', category: 'Housing', defaultFrequency: 12 },
+            { id: 'groceries', name: 'Groceries', category: 'Food', defaultFrequency: 12 },
+          ],
+        },
+        costs: {
+          FL: {
+            rent: 4000,     // 48,000 / yr
+            groceries: 1817.75, // 21,813 / yr => Total $69,813 / yr
+          },
+        },
+        frequencies: {
+          rent: 12,
+          groceries: 12,
+        },
+      };
+      inputs.actualTracking = {
+        2026: {
+          year: 2026,
+          totalLivingExpenses: 69813, // 100% on target with detailed budget
+          equityReturnRate: 0.07,
+          fixedIncomeReturnRate: 0.04,
+        },
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find(r => r.year === 2026);
+      expect(row2026).toBeDefined();
+
+      // Guardrail upper/lower limits should be based on $69,813, NOT $54,603
+      expect(row2026?.guardrailUpperLimit).toBeCloseTo(69813 * 1.15, 0);
+      expect(row2026?.guardrailLowerLimit).toBeCloseTo(69813 * 0.85, 0);
+
+      // Spending variance should be 0 because actuals exactly equaled the detailed budget
+      // and surplus gap should not flag a false $15,210 deficit
+      expect(row2026?.actualSurplusGap).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should handle actual years with zero logged spending without injecting projected OOP maximum into actual living expenses', () => {
+      const inputs = getBaseActualsTestInputs();
+      inputs.you.birthDate = '1965-01-01'; // Age 61 in 2026 (Pre-65)
+      inputs.annualLivingExpenses = 61883;
+      inputs.you.healthcare = {
+        fileSSA44LifeChangingEvent: true,
+        medicarePartBPremium: null,
+        FL: {
+          pre65MedicalPremium: 500,
+          pre65MedicalOOP: 5000,
+          pre65DentalPremium: 50,
+          pre65DentalOOP: 1000,
+          pre65VisionPremium: 20,
+          pre65VisionOOP: 200,
+          supplementPremium: null,
+          supplementOOP: null,
+          medicarePartDPremium: null,
+          medicarePartDDeductibleCopays: null,
+          post65HearingCare: null,
+          post65DentalPremium: null,
+          post65DentalOOP: null,
+          post65VisionPremium: null,
+          post65VisionOOP: null,
+        },
+        MD: {
+          pre65MedicalPremium: 500,
+          pre65MedicalOOP: 5000,
+          pre65DentalPremium: 50,
+          pre65DentalOOP: 1000,
+          pre65VisionPremium: 20,
+          pre65VisionOOP: 200,
+          supplementPremium: null,
+          supplementOOP: null,
+          medicarePartDPremium: null,
+          medicarePartDDeductibleCopays: null,
+          post65HearingCare: null,
+          post65DentalPremium: null,
+          post65DentalOOP: null,
+          post65VisionPremium: null,
+          post65VisionOOP: null,
+        },
+      };
+
+      // 2026 actual record with ZERO logged transactions / no totalLivingExpenses entered
+      inputs.actualTracking = {
+        2026: {
+          year: 2026,
+          equityReturnRate: 0.08,
+          fixedIncomeReturnRate: 0.04,
+          totalLivingExpenses: null,
+          healthcareOOP: null,
+        },
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find(r => r.year === 2026);
+      expect(row2026).toBeDefined();
+
+      // Living expenses and realized OOP should be 0 because nothing was logged/entered
+      expect(row2026?.livingExpenses).toBe(0);
+      expect(row2026?.healthcareOOP).toBe(0);
+
+      // Planned OOP allowance is preserved as the planning ceiling (5000 + 1000 + 200 = 6200)
+      expect(row2026?.plannedHealthcareOOP).toBeCloseTo(6200, 0);
+
+      // Un-logged spending should NOT flag an overspending penalty
+      expect(row2026?.actualSurplusGap).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should track realized healthcare OOP against maximum planned allowance and calculate spending savings', () => {
+      const inputs = getBaseActualsTestInputs();
+      inputs.you.birthDate = '1965-01-01'; // Age 61 in 2026 (Pre-65)
+      inputs.annualLivingExpenses = 60000;
+      inputs.you.healthcare = {
+        fileSSA44LifeChangingEvent: true,
+        medicarePartBPremium: null,
+        FL: {
+          pre65MedicalPremium: 500,
+          pre65MedicalOOP: 5000,
+          pre65DentalPremium: 50,
+          pre65DentalOOP: 1000,
+          pre65VisionPremium: 20,
+          pre65VisionOOP: 200,
+          supplementPremium: null,
+          supplementOOP: null,
+          medicarePartDPremium: null,
+          medicarePartDDeductibleCopays: null,
+          post65HearingCare: null,
+          post65DentalPremium: null,
+          post65DentalOOP: null,
+          post65VisionPremium: null,
+          post65VisionOOP: null,
+        },
+        MD: {
+          pre65MedicalPremium: 500,
+          pre65MedicalOOP: 5000,
+          pre65DentalPremium: 50,
+          pre65DentalOOP: 1000,
+          pre65VisionPremium: 20,
+          pre65VisionOOP: 200,
+          supplementPremium: null,
+          supplementOOP: null,
+          medicarePartDPremium: null,
+          medicarePartDDeductibleCopays: null,
+          post65HearingCare: null,
+          post65DentalPremium: null,
+          post65DentalOOP: null,
+          post65VisionPremium: null,
+          post65VisionOOP: null,
+        },
+      };
+
+      // User logged $55,000 living expenses and only $400 out-of-pocket medical co-pays
+      inputs.actualTracking = {
+        2026: {
+          year: 2026,
+          totalLivingExpenses: 55000,
+          healthcareOOP: 400,
+          equityReturnRate: 0.08,
+          fixedIncomeReturnRate: 0.04,
+        },
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find(r => r.year === 2026);
+      expect(row2026).toBeDefined();
+
+      expect(row2026?.livingExpenses).toBeCloseTo(55400, 1);
+      expect(row2026?.healthcareOOP).toBeCloseTo(400, 1);
+      expect(row2026?.plannedHealthcareOOP).toBeCloseTo(6200, 0);
+
+      // Planned total budget = $60,000 base + $6,200 OOP max = $66,200
+      // Actual total spend = $55,400
+      // Spending savings = $66,200 - $55,400 = +$10,800 savings!
+      expect(row2026?.actualSurplusGap).toBeGreaterThan(10000);
+    });
+
+    it('should use explicit priorTaxReturnMAGI for 2-year lookback IRMAA evaluation in initial simulation years', () => {
+      const inputs = getBaseActualsTestInputs();
+      inputs.isSingleFiler = true;
+      // Primary is 66 in 2026 (born 1960), meaning on Medicare Part B
+      inputs.you.birthDate = '1960-01-01';
+      inputs.you.plannedRetirementAge = 65;
+
+      // Provide explicit 2024 tax return MAGI that lands in IRMAA Tier 2 (> $133,000 for single in 2024)
+      inputs.priorTaxReturnMAGI = {
+        2024: 165000,
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find(r => r.year === 2026);
+      expect(row2026).toBeDefined();
+
+      // Lookback MAGI two years ago should be exactly 165,000
+      expect(row2026?.magiTwoYearsAgo).toBe(165000);
+      expect(row2026?.surchargeTier).toBeGreaterThan(0);
+      expect(row2026?.combinedSurchargeAnnual).toBeGreaterThan(0);
+    });
   });
 
   describe('Custom Roth Conversion Scenarios', () => {
@@ -2070,6 +2282,188 @@ describe('runRetirementSimulation fixes', () => {
 
       // 2028 in FL: Auto Gas ($200*12 = 2400) + Termite ($80*12 = 960) = $3,360 (Snow Plowing excluded)
       expect(row2028?.livingExpenses).toBe(3360);
+    });
+  });
+
+  describe('Spouse Healthcare Covered by Working Partner Plan', () => {
+    const getBaseHealthcareInputs = (coveredByWorkingSpouse: boolean): AppStateInputs => ({
+      you: {
+        name: 'Primary',
+        birthDate: '1960-06-27',
+        plannedRetirementAge: 66,
+        plannedRetirementMonth: 11, // Retires Nov 2026 (works Jan - Oct 2026, 10 months)
+        targetSSClaimingAge: 70,
+        estimatedPIA: 4000,
+        activeSalary: 200000, // Working Jan - Oct 2026
+        healthcare: {
+          fileSSA44LifeChangingEvent: true,
+          medicareStartMode: 'customDate' as const,
+          medicareStartDate: '2026-11-01', // Starts Medicare Nov 2026
+          MD: {
+            pre65MedicalPremium: null,
+            pre65MedicalOOP: null,
+            pre65DentalPremium: null,
+            pre65DentalOOP: null,
+            pre65VisionPremium: null,
+            pre65VisionOOP: null,
+            medicarePartDPremium: null,
+            medicarePartDDeductibleCopays: null,
+            supplementPremium: 250,
+            supplementOOP: 283,
+            post65HearingCare: null,
+            post65DentalPremium: 50,
+            post65DentalOOP: 250,
+            post65VisionPremium: 25,
+            post65VisionOOP: 250,
+          },
+          FL: {
+            pre65MedicalPremium: null,
+            pre65MedicalOOP: null,
+            pre65DentalPremium: null,
+            pre65DentalOOP: null,
+            pre65VisionPremium: null,
+            pre65VisionOOP: null,
+            medicarePartDPremium: null,
+            medicarePartDDeductibleCopays: null,
+            supplementPremium: 250,
+            supplementOOP: 283,
+            post65HearingCare: null,
+            post65DentalPremium: 50,
+            post65DentalOOP: 250,
+            post65VisionPremium: 25,
+            post65VisionOOP: 250,
+          },
+          medicarePartBPremium: null,
+        },
+      },
+      wife: {
+        name: 'Spouse',
+        birthDate: '1964-03-11', // Age 62 in 2026, reaches 65 in 2029
+        plannedRetirementAge: 61,
+        plannedRetirementMonth: 6,
+        targetSSClaimingAge: 70,
+        estimatedPIA: 2500,
+        activeSalary: 0,
+        healthcare: {
+          fileSSA44LifeChangingEvent: true,
+          coveredByWorkingSpousePlan: coveredByWorkingSpouse,
+          medicareStartMode: 'age65' as const,
+          medicareStartDate: null,
+          MD: {
+            pre65MedicalPremium: 590,
+            pre65DentalPremium: 30,
+            pre65VisionPremium: 10,
+            pre65MedicalOOP: 6000,
+            pre65DentalOOP: 250,
+            pre65VisionOOP: 250,
+            medicarePartDPremium: null,
+            medicarePartDDeductibleCopays: null,
+            supplementPremium: 280,
+            supplementOOP: 337,
+            post65HearingCare: null,
+            post65DentalPremium: 50,
+            post65DentalOOP: 250,
+            post65VisionPremium: 25,
+            post65VisionOOP: 250,
+          },
+          FL: {
+            pre65MedicalPremium: 590,
+            pre65DentalPremium: 30,
+            pre65VisionPremium: 10,
+            pre65MedicalOOP: 6000,
+            pre65DentalOOP: 250,
+            pre65VisionOOP: 250,
+            medicarePartDPremium: null,
+            medicarePartDDeductibleCopays: null,
+            supplementPremium: 280,
+            supplementOOP: 337,
+            post65HearingCare: null,
+            post65DentalPremium: 50,
+            post65DentalOOP: 250,
+            post65VisionPremium: 25,
+            post65VisionOOP: 250,
+          },
+          medicarePartBPremium: null,
+        },
+      },
+      portfolio: {
+        yourPreTaxIRA: 500000,
+        yourRothIRA: 50000,
+        yourTaxableBrokerage: 0,
+        yourTaxableBasis: 0,
+        yourCash: 50000,
+        wifePreTaxIRA: 200000,
+        wifeRothIRA: 20000,
+        wifeTaxableBrokerage: 0,
+        wifeTaxableBasis: 0,
+        wifeCash: 0,
+      },
+      jurisdiction: {
+        currentState: 'MD',
+        targetState: 'MD',
+        relocationYear: null,
+      },
+      growthAssumptions: {
+        equityReturnRate: 0.05,
+        fixedIncomeReturnRate: 0.03,
+        cpiInflationRate: 0.0,
+        healthcareInflationRate: 0.0,
+      },
+      annualLivingExpenses: 60000,
+      annualRothConversion: 0,
+      rothConversionTargetValue: null,
+      rothConversionStartYear: 2027,
+      rothConversionEndYear: 2030,
+      rothConversionStrategy: 'flat' as const,
+      monteCarloSettings: {
+        mode: 'monte-carlo',
+        equityVolatility: 0.0,
+        fixedIncomeVolatility: 0.0,
+        correlation: 0.0,
+        trials: 1,
+        seed: 42,
+      },
+      isConfigured: true,
+      isSingleFiler: false,
+    });
+
+    it('should waive spouse pre-65 premiums and OOP during working months and activate post-retirement', () => {
+      const inputs = getBaseHealthcareInputs(true);
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find((r) => r.year === 2026);
+      const row2027 = ledger.find((r) => r.year === 2027);
+
+      expect(row2026).toBeDefined();
+      expect(row2027).toBeDefined();
+
+      // In 2026: Primary works Jan-Oct (10 mo). Spouse is covered on primary's plan for 10 mo ($0).
+      // Spouse only pays Pre-65 for Nov & Dec (2 mo):
+      // Monthly pre-65 = $590 + $30 + $10 = $630.
+      // 2 mo pre-65 = $630 * 2 = $1,260.
+      expect(row2026?.preMedicareHealthcareCost).toBe(1260);
+
+      // Spouse planned OOP is pro-rated for 2 months: ($6,000 + $250 + $250) * (2/12) = $6,500 * (2/12) = $1,083.33
+      // Primary Medicare OOP for 2 months (Nov & Dec): ($283 + $250 + $250) * (2/12) = $783 * (2/12) = $130.50
+      // Total plannedHealthcareOOP = 1083.33 + 130.50 = $1,213.83
+      expect(Math.round(row2026?.plannedHealthcareOOP ?? 0)).toBe(1214);
+
+      // In 2027: Primary is fully retired all 12 months. Spouse is on pre-65 all 12 months:
+      // Annual pre-65 = $630 * 12 = $7,560.
+      expect(row2027?.preMedicareHealthcareCost).toBe(7560);
+      // Annual spouse OOP = $6,500, primary Medicare OOP = $783 -> Total = $7,283
+      expect(Math.round(row2027?.plannedHealthcareOOP ?? 0)).toBe(7283);
+    });
+
+    it('should charge full 12 months pre-65 premiums when option is disabled', () => {
+      const inputs = getBaseHealthcareInputs(false);
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find((r) => r.year === 2026);
+
+      expect(row2026).toBeDefined();
+      // When disabled, spouse incurs all 12 months of pre-65 premiums in 2026: $630 * 12 = $7,560
+      expect(row2026?.preMedicareHealthcareCost).toBe(7560);
+      // Spouse full year OOP ($6,500) + Primary 2 mo Medicare OOP ($130.50) = $6,630.50
+      expect(Math.round(row2026?.plannedHealthcareOOP ?? 0)).toBe(6631);
     });
   });
 });

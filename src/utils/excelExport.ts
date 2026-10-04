@@ -86,6 +86,7 @@ export const generateExcelWorkbook = (ledger: SimulationResultRow[], inputs: App
     ["Regime Switching & Mean Reversion", inputs.monteCarloSettings.enableRegimeSwitching !== false ? "Enabled (Markov 2-State + Mean Reversion)" : "Disabled (i.i.d. Random Walk)"],
     ["Historical Sampling Strategy", (inputs.monteCarloSettings.historicalSamplingStrategy ?? 'hybrid').toUpperCase()],
     ["Historical Mean Calibration", inputs.monteCarloSettings.calibrateHistoricalMeans !== false ? "Calibrated (Aligned to Baseline)" : "Raw History (12.3% Stock)"],
+    ["Historical Fat-Tail Modeling", inputs.monteCarloSettings.enableHistoricalStudentT ? "Student-t (df=5 Fat Tails)" : "Standard (Empirical History)"],
     [],
     ["STATE TAX RELOCATION"],
     ["Current Home State", inputs.jurisdiction.currentState],

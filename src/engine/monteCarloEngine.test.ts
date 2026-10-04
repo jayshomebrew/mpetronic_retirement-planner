@@ -858,6 +858,153 @@ describe('Constant vs Randomized CPI Simulation', () => {
     expect(summary1.representativeSequences.best.equityReturns).toEqual(summary2.representativeSequences.best.equityReturns);
     expect(summary1.representativeSequences.best.fixedIncomeReturns).toEqual(summary2.representativeSequences.best.fixedIncomeReturns);
   });
+
+  describe('CMA Volatility Drag & Calibrated Inflation', () => {
+    it('calibrates forward inflation shocks to anchor around target CPI in synthetic sequences', () => {
+      const rand = mulberry32(42);
+      const targetCpi = 0.024; // Vanguard 2.4% expectation
+      const trials = 100;
+      let totalCpi = 0;
+      let count = 0;
+
+      for (let t = 0; t < trials; t++) {
+        const seq = generateSyntheticSequence(0.068, 0.16, 0.046, 0.055, 0.15, rand, true, null, true, targetCpi);
+        for (const cpi of (seq.inflationRates || [])) {
+          totalCpi += cpi;
+          count++;
+        }
+      }
+
+      const meanCpi = totalCpi / count;
+      // Mean sampled inflation across 100 trials should center tightly around target 2.4% (rather than historical 4.0%)
+      expect(meanCpi).toBeCloseTo(targetCpi, 2);
+    });
+
+    it('calibrates forward inflation shocks in historical bootstrap sequences when calibrateMeans is enabled', () => {
+      const rand = mulberry32(101);
+      const targetCpi = 0.025;
+      const seq = generateHistoricalSequence(false, undefined, rand, true, null, true, 0.07, 0.04, targetCpi);
+      const rates = seq.inflationRates || [];
+      const meanCpi = rates.reduce((a, b) => a + b, 0) / rates.length;
+      expect(meanCpi).toBeCloseTo(targetCpi, 1);
+    });
+
+    it('applies volatility drag adjustment to elevate annual arithmetic drift in synthetic sequences', () => {
+      // 7.0% target geometric CAGR with 16% volatility requires ~8.28% arithmetic drift
+      const targetGeometric = 0.07;
+      const vol = 0.16;
+      const rand = mulberry32(999);
+      const trials = 300;
+      let totalAnnualEquity = 0;
+      let count = 0;
+
+      for (let t = 0; t < trials; t++) {
+        // Without regime switching to directly measure normal distribution mean
+        const seq = generateSyntheticSequence(targetGeometric, vol, 0.04, 0.05, 0.15, rand, false, 0.025, false, 0.025);
+        for (const ret of seq.equityReturns) {
+          totalAnnualEquity += ret;
+          count++;
+        }
+      }
+
+      const realizedArithmeticMean = totalAnnualEquity / count;
+      // Realized arithmetic mean should be near 8.28% (elevated above 7.0% by ~1.28% volatility drag)
+      expect(realizedArithmeticMean).toBeGreaterThan(0.078);
+      expect(realizedArithmeticMean).toBeLessThan(0.088);
+    });
+  });
+
+  describe('Student-t distribution handling', () => {
+    it('applies Student-t fat-tail adjustments to historical sequences when enableStudentT is true', () => {
+      const rand1 = mulberry32(12345);
+      const rand2 = mulberry32(12345);
+
+      const standardSeq = generateHistoricalSequence(
+        false, undefined, rand1, false, 0.025, true, 0.07, 0.04, 0.025, false
+      );
+      const studentTSeq = generateHistoricalSequence(
+        false, undefined, rand2, false, 0.025, true, 0.07, 0.04, 0.025, true
+      );
+
+      expect(standardSeq.equityReturns.length).toBe(35);
+      expect(studentTSeq.equityReturns.length).toBe(35);
+
+      // Student-t sequence should differ due to fat-tail tScale scaling
+      expect(studentTSeq.equityReturns).not.toEqual(standardSeq.equityReturns);
+
+      // All returns must remain safely clamped within institutional limits
+      for (const eq of studentTSeq.equityReturns) {
+        expect(eq).toBeGreaterThanOrEqual(EQUITY_RETURN_MIN);
+        expect(eq).toBeLessThanOrEqual(EQUITY_RETURN_MAX);
+      }
+      for (const fi of studentTSeq.fixedIncomeReturns) {
+        expect(fi).toBeGreaterThanOrEqual(BOND_RETURN_MIN);
+        expect(fi).toBeLessThanOrEqual(BOND_RETURN_MAX);
+      }
+    });
+
+    it('runs full Monte Carlo simulation with enableHistoricalStudentT toggle', () => {
+      const baseInputs: AppStateInputs = {
+        you: {
+          birthDate: '1960-06-15',
+          estimatedPIA: 3000,
+          targetSSClaimingAge: 70,
+          plannedRetirementAge: 65,
+          activeSalary: 0,
+        },
+        wife: {
+          birthDate: '1964-03-10',
+          estimatedPIA: 2000,
+          targetSSClaimingAge: 67,
+          plannedRetirementAge: 62,
+          activeSalary: 0,
+        },
+        portfolio: {
+          yourPreTaxIRA: 1000000,
+          yourRothIRA: 50000,
+          yourTaxableBrokerage: 200000,
+          yourTaxableBasis: 150000,
+          wifePreTaxIRA: 200000,
+          wifeRothIRA: 0,
+          wifeTaxableBrokerage: 0,
+          wifeTaxableBasis: 0,
+          yourCash: 50000,
+        },
+        jurisdiction: {
+          relocationYear: null,
+          currentState: 'MD',
+          targetState: 'FL',
+        },
+        growthAssumptions: {
+          equityReturnRate: 0.07,
+          fixedIncomeReturnRate: 0.04,
+          cpiInflationRate: 0.03,
+          healthcareInflationRate: 0.05,
+        },
+        annualLivingExpenses: 80000,
+        annualRothConversion: 0,
+        rothConversionStrategy: 'flat',
+        rothConversionTargetValue: null,
+        monteCarloSettings: {
+          mode: 'historical',
+          equityVolatility: 0.15,
+          fixedIncomeVolatility: 0.05,
+          correlation: 0.15,
+          trials: 50,
+          seed: 42,
+          enableHistoricalStudentT: true,
+        },
+        isConfigured: true,
+        isSingleFiler: false,
+      };
+
+      const summary = runMonteCarloSimulation(baseInputs);
+      expect(summary.trialsRun).toBe(50);
+      expect(summary.successRate).toBeGreaterThanOrEqual(0);
+      expect(summary.percentiles.length).toBe(35);
+    });
+  });
 });
+
 
 
