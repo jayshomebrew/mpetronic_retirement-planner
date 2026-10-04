@@ -469,6 +469,26 @@ export const DocumentationDialog: React.FC<DocumentationDialogProps> = ({
             </div>
           </div>
 
+          <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <span className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Deep Dive: Capital Market Assumptions (CMAs) & Volatility Drag</span>
+              </span>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Read the mathematical derivation of Compound Annual Growth Rate (CAGR), arithmetic drift (μ = g + σ² / 2), and forward inflation calibration.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveSectionId('cma-volatility-drag')}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-semibold rounded-xl text-xs flex items-center gap-1 shrink-0 transition-all cursor-pointer border border-slate-700 self-start sm:self-auto"
+            >
+              <span>Read Math Deep Dive</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
           <div className="p-4 bg-indigo-950/20 border border-indigo-900/30 rounded-xl flex items-center justify-between">
             <div className="text-xs text-slate-300">
               Run Monte Carlo trials and test historical market stress tests:
@@ -756,6 +776,300 @@ export const DocumentationDialog: React.FC<DocumentationDialogProps> = ({
       ),
     },
     {
+      id: 'cma-volatility-drag',
+      title: 'Capital Market Assumptions, CAGR & Volatility Drag',
+      category: 'Deep Dives',
+      icon: Calculator,
+      badge: 'Simulation Math',
+      keywords: [
+        'cma',
+        'capital market assumptions',
+        'cagr',
+        'compound annual growth rate',
+        'volatility drag',
+        'variance drag',
+        'arithmetic drift',
+        'drift',
+        'geometric mean',
+        'vanguard',
+        'blackrock',
+        'jpmorgan',
+        'consensus',
+        'stochastic math',
+        'ito lemma',
+        'inflation calibration',
+        'forward inflation shocks',
+      ],
+      content: (
+        <div className="space-y-6">
+          {/* Executive Overview */}
+          <div className="p-5 bg-gradient-to-br from-indigo-950/40 via-slate-900 to-slate-950 border border-indigo-500/30 rounded-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-indigo-400">
+                <Calculator className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-100">Capital Market Assumptions (CMAs) & Stochastic Mathematics</h3>
+                <p className="text-xs text-indigo-400/90 font-medium">Compound Annual Growth Rate (CAGR), Volatility Drag, and Forward Shock Calibration</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed mt-3">
+              Retirement Planner 2.0 integrates institutional Capital Market Assumptions (CMAs) from premier global asset managers (Vanguard, BlackRock, J.P. Morgan, and Industry Consensus) to ground your retirement simulations in realistic, forward-looking economic analysis rather than naive historical extrapolation. To simulate these expectations with institutional fidelity, the engine mathematically accounts for <strong className="text-emerald-400">volatility drag</strong> and calibrates historical crisis shocks to modern secular inflation targets.
+            </p>
+          </div>
+
+          {/* Section 1: Institutional CMAs */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              1. Institutional Capital Market Assumptions (CMAs)
+            </h4>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Why not simply assume 10% returns based on the 100-year S&P 500 average? Over the past century, US equities benefited from extraordinary tailwinds: demographic expansion, falling interest rates, and post-war industrial dominance. Today, forward-looking institutions construct 10-to-30 year CMAs based on starting equity valuations (Shiller CAPE), current bond yields, sovereign debt dynamics, and demographic headwinds:
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div className="p-3.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-rose-400">Vanguard VCMM (2026)</span>
+                  <span className="text-[10px] text-slate-500">30-Year Horizon</span>
+                </div>
+                <div className="text-slate-300 space-y-0.5 text-[10px]">
+                  <div>Equities: <strong className="text-slate-100">6.8% CAGR</strong> (16.0% Volatility)</div>
+                  <div>Fixed Income: <strong className="text-slate-100">4.6% CAGR</strong> (5.5% Volatility)</div>
+                  <div>CPI Inflation: <strong className="text-slate-100">2.4% Secular</strong></div>
+                </div>
+                <p className="text-[9px] text-slate-400 font-sans pt-1">
+                  Anchored by the Vanguard Capital Markets Model. Reflects 30-year secular expectations (factoring in 10-year initial multiple compression of 5.0%–5.2% followed by mean reversion to 7.0%+ earnings growth).
+                </p>
+              </div>
+
+              <div className="p-3.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-400">BlackRock BII (2026)</span>
+                  <span className="text-[10px] text-slate-500">Secular Transition</span>
+                </div>
+                <div className="text-slate-300 space-y-0.5 text-[10px]">
+                  <div>Equities: <strong className="text-slate-100">6.9% CAGR</strong> (15.8% Volatility)</div>
+                  <div>Fixed Income: <strong className="text-slate-100">4.7% CAGR</strong> (5.7% Volatility)</div>
+                  <div>CPI Inflation: <strong className="text-slate-100">2.6% Secular</strong></div>
+                </div>
+                <p className="text-[9px] text-slate-400 font-sans pt-1">
+                  BlackRock Investment Institute assumptions incorporating AI productivity tailwinds and persistent structural supply constraints.
+                </p>
+              </div>
+
+              <div className="p-3.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-blue-400">J.P. Morgan LTCMA (2026)</span>
+                  <span className="text-[10px] text-slate-500">200+ Asset Classes</span>
+                </div>
+                <div className="text-slate-300 space-y-0.5 text-[10px]">
+                  <div>Equities: <strong className="text-slate-100">7.2% CAGR</strong> (15.5% Volatility)</div>
+                  <div>Fixed Income: <strong className="text-slate-100">4.8% CAGR</strong> (5.5% Volatility)</div>
+                  <div>CPI Inflation: <strong className="text-slate-100">2.5% Secular</strong></div>
+                </div>
+                <p className="text-[9px] text-slate-400 font-sans pt-1">
+                  Long-Term Capital Market Assumptions factoring in capital deepening, fiscal deficits, and corporate earnings resilience.
+                </p>
+              </div>
+
+              <div className="p-3.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-emerald-400">Industry Consensus (2026)</span>
+                  <span className="text-[10px] text-slate-500">Multi-Model Median</span>
+                </div>
+                <div className="text-slate-300 space-y-0.5 text-[10px]">
+                  <div>Equities: <strong className="text-slate-100">7.0% CAGR</strong> (15.5% Volatility)</div>
+                  <div>Fixed Income: <strong className="text-slate-100">4.6% CAGR</strong> (5.5% Volatility)</div>
+                  <div>CPI Inflation: <strong className="text-slate-100">2.5% Secular</strong></div>
+                </div>
+                <p className="text-[9px] text-slate-400 font-sans pt-1">
+                  A balanced, institution-neutral baseline synthesized across major institutional whitepapers.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: CAGR vs Arithmetic Mean */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              2. Compound Annual Growth Rate (CAGR) vs. Arithmetic Mean (Drift μ)
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
+                <span className="text-xs font-bold text-emerald-400 block">Compound Annual Growth Rate (CAGR)</span>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  <strong>Definition:</strong> The true geometric rate at which wealth accumulates over multi-year periods. This is what you actually experience in your brokerage account balance and net worth statement.
+                </p>
+                <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-lg font-mono text-[10px] text-slate-300">
+                  CAGR = (Ending Wealth / Starting Wealth)^(1 / Years) - 1
+                </div>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  Every institutional CMA report publishes its projections as geometric CAGRs because that reflects what long-term investors realize.
+                </p>
+              </div>
+
+              <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
+                <span className="text-xs font-bold text-indigo-400 block">Arithmetic Mean / Drift (μ)</span>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  <strong>Definition:</strong> The simple average of individual single-year returns across discrete annual periods.
+                </p>
+                <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-lg font-mono text-[10px] text-slate-300">
+                  Arithmetic Mean = (Return_1 + Return_2 + ... + Return_N) / N
+                </div>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  In stochastic simulation models, single-year randomized draws are sampled from a distribution centered around the arithmetic mean (drift μ).
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: The Math of Volatility Drag */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <Calculator className="w-3.5 h-3.5 text-amber-400" />
+              3. The Mathematics of Volatility Drag (Variance Drag)
+            </h4>
+            
+            <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-3">
+              <div className="text-[11px] text-slate-300 leading-relaxed space-y-2">
+                <p>
+                  Why is the geometric compound rate (CAGR) always lower than the arithmetic average of annual returns? Consider this intuitive example:
+                </p>
+                <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg font-mono text-[11px] text-slate-200 space-y-1">
+                  <div>Starting Balance: $100,000</div>
+                  <div>Year 1 (+50%): $100,000 * 1.50 = $150,000</div>
+                  <div>Year 2 (-50%): $150,000 * 0.50 = $75,000</div>
+                  <div className="pt-1 text-rose-400 font-bold">
+                    Arithmetic Average Return: (+50% - 50%) / 2 = 0.0%
+                  </div>
+                  <div className="text-rose-400 font-bold">
+                    Realized Portfolio Outcome: Down -$25,000 (-25% total loss, or -13.4% CAGR per year!)
+                  </div>
+                </div>
+                <p>
+                  Because wealth compounding is multiplicative rather than additive, down years disproportionately erode capital (a 50% loss requires a 100% gain just to break even). This performance erosion is known as <strong className="text-amber-400">volatility drag</strong>.
+                </p>
+              </div>
+
+              {/* Mathematical Derivation Box */}
+              <div className="p-3.5 bg-slate-900/90 border border-slate-700/80 rounded-xl space-y-2 font-mono text-[11px]">
+                <span className="text-xs font-bold text-amber-400 block font-sans">Continuous-Time Mathematical Derivation</span>
+                <p className="text-slate-300 text-[10px] font-sans">
+                  In mathematical finance, an asset price S follows Geometric Brownian Motion with drift parameter μ and annual volatility σ:
+                </p>
+                <div className="p-2 bg-slate-950 border border-slate-800 rounded text-emerald-400">
+                  dS_t = μ * S_t * dt + σ * S_t * dW_t
+                </div>
+                <p className="text-slate-300 text-[10px] font-sans">
+                  Applying Itô's Lemma to the logarithmic price process ln(S_t) yields:
+                </p>
+                <div className="p-2 bg-slate-950 border border-slate-800 rounded text-indigo-300">
+                  d(ln S_t) = (μ - σ² / 2) * dt + σ * dW_t
+                </div>
+                <p className="text-slate-300 text-[10px] font-sans">
+                  Integrating over a 1-year discrete interval (dt = 1), the expected compound annual rate g (CAGR) is:
+                </p>
+                <div className="p-2 bg-slate-950 border border-slate-800 rounded text-amber-300 font-bold">
+                  g ≈ μ - (σ² / 2)
+                </div>
+                <p className="text-slate-300 text-[10px] font-sans">
+                  Rearranging to solve for the required annual stochastic simulation drift μ:
+                </p>
+                <div className="p-2 bg-slate-950 border border-slate-800 rounded text-emerald-400 font-bold">
+                  μ = g + (σ² / 2)
+                </div>
+              </div>
+
+              {/* Real World Portfolio Examples */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-[11px] font-mono">
+                <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-lg space-y-1">
+                  <span className="font-bold text-emerald-400 block font-sans">Equities (16% Volatility)</span>
+                  <div className="text-slate-300">Target CAGR (g): <strong>6.80%</strong></div>
+                  <div className="text-slate-300">Annual Volatility (σ): <strong>16.00%</strong></div>
+                  <div className="text-amber-400">Volatility Drag (σ² / 2): <strong>(0.16)² / 2 = 1.28%</strong></div>
+                  <div className="text-emerald-400 font-bold pt-0.5">Required Drift (μ): 6.80% + 1.28% = 8.08%</div>
+                </div>
+
+                <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-lg space-y-1">
+                  <span className="font-bold text-sky-400 block font-sans">Fixed Income (5.5% Volatility)</span>
+                  <div className="text-slate-300">Target CAGR (g): <strong>4.60%</strong></div>
+                  <div className="text-slate-300">Annual Volatility (σ): <strong>5.50%</strong></div>
+                  <div className="text-amber-400">Volatility Drag (σ² / 2): <strong>(0.055)² / 2 = 0.15%</strong></div>
+                  <div className="text-sky-400 font-bold pt-0.5">Required Drift (μ): 4.60% + 0.15% = 4.75%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 4: How It Is Used in the App */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              4. How These Concepts Power Retirement Planner 2.0
+            </h4>
+
+            <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-4">
+              <div className="space-y-1.5">
+                <span className="text-xs font-bold text-slate-200 block">Single Source of Truth (SSOT) Across All Workspaces</span>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  In simplified calculators, changing between deterministic and Monte Carlo modes requires re-entering different return numbers. In Retirement Planner 2.0, the return sliders always represent your <strong className="text-emerald-400">Target CAGR</strong>:
+                </p>
+                <ul className="text-[11px] text-slate-400 space-y-1 list-disc list-inside leading-relaxed pl-1">
+                  <li><strong>In Flat Mode:</strong> Volatility is zero. Wealth compounds deterministically at the exact Target CAGR (e.g. 6.8%).</li>
+                  <li><strong>In Monte Carlo Mode:</strong> The engine automatically sets the distribution center to arithmetic drift <strong className="text-slate-200">μ = Target CAGR + (σ² / 2)</strong>. After 1,000 multi-year trials, the <strong className="text-emerald-400">P50 median trial</strong> accumulates to the exact wealth expected from your Target CAGR. Without this mathematical adjustment, a simulation centered at 6.8% would erroneously compound at only 5.52% CAGR due to volatility drag!</li>
+                </ul>
+              </div>
+
+              <div className="space-y-1.5 border-t border-slate-800/80 pt-3">
+                <span className="text-xs font-bold text-indigo-400 block">Forward Secular Inflation Shock Calibration</span>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Historical US CPI (1970–2025) averaged ~4.0%, heavily skewed by the 1970s stagflation crisis. If an engine simply fed raw historical CPI into a forward simulation, your 30-year purchasing power would be excessively penalized compared to modern institutional expectations (2.4%–2.6%).
+                </p>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Retirement Planner 2.0 uses a zero-centered historical shock decomposition:
+                </p>
+                <div className="p-2 bg-slate-900 border border-slate-800 rounded font-mono text-[10px] text-slate-200">
+                  Shock_Year = Historical_CPI_Year - Historical_Mean_CPI (4.0%)<br />
+                  Simulated_CPI_Year = Target_CMA_CPI (e.g. 2.4%) + Shock_Year
+                </div>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  This mathematical formulation preserves historical crisis fat-tails, sequence spikes, and high-inflation clusters (such as 1970s stagflation or 2022 supply shocks) while ensuring the median multi-decade inflation rate converges to your selected CMA secular benchmark.
+                </p>
+              </div>
+
+              <div className="space-y-1.5 border-t border-slate-800/80 pt-3">
+                <span className="text-xs font-bold text-amber-400 block">Dynamic Overrides & Annual Update Portability</span>
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Whenever you adjust an equity or bond slider away from an institutional preset, the system smoothly marks the profile as <strong className="text-amber-400">Custom (Anchored)</strong>, displays live delta badges (e.g. <span className="font-mono text-amber-400">+0.5%</span>), and displays individual 1-click restore buttons. You can export your customized profiles to JSON, share them with an advisor, or import next year's updated institutional publications.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation CTA */}
+          <div className="p-4 bg-indigo-950/20 border border-indigo-900/30 rounded-xl flex items-center justify-between">
+            <div className="text-xs text-slate-300">
+              Explore these assumptions live in the Monte Carlo simulation workspace:
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onNavigateTab?.(2);
+                onClose();
+              }}
+              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <span>Open Workspace 3 (Monte Carlo)</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      ),
+    },
+    {
       id: 'faq',
       title: 'Frequently Asked Questions & Tips',
       category: 'Reference',
@@ -814,7 +1128,7 @@ export const DocumentationDialog: React.FC<DocumentationDialogProps> = ({
         </div>
       ),
     },
-  ], [onNavigateTab, onClose]);
+  ], [onNavigateTab, onClose, setActiveSectionId]);
 
   // Filter sections based on search query
   const filteredSections = useMemo(() => {

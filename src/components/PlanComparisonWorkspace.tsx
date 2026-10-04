@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { AppStateInputs, SavedPlan, SimulationResultRow, getSimulationStartYear } from '../types';
+import { AppStateInputs, SavedPlan, SimulationResultRow, LockedReturnSequence, getSimulationStartYear } from '../types';
 import { runRetirementSimulation } from '../engine/simulationEngine';
 import { 
   Plus, 
@@ -18,7 +18,9 @@ import {
   FileText,
   MapPin,
   Calendar,
-  Zap
+  Zap,
+  Download,
+  Upload
 } from 'lucide-react';
 
 interface PlanComparisonWorkspaceProps {
@@ -32,6 +34,9 @@ interface PlanComparisonWorkspaceProps {
   setSelectedPlanAId: (id: string) => void;
   selectedPlanBId: string;
   setSelectedPlanBId: (id: string) => void;
+  ledger?: SimulationResultRow[];
+  activeSequence?: LockedReturnSequence | null;
+  globalScenario?: 'flat' | 'p10' | 'p50' | 'p90';
 }
 
 export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = ({
@@ -45,6 +50,9 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
   setSelectedPlanAId,
   selectedPlanBId,
   setSelectedPlanBId,
+  ledger,
+  activeSequence,
+  globalScenario,
 }) => {
   const [newPlanName, setNewPlanName] = useState('');
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -52,11 +60,32 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
   const [inspectingPlan, setInspectingPlan] = useState<SavedPlan | null>(null);
   const simStartYear = getSimulationStartYear(inputs);
 
-  const endingAge = useMemo(() => {
-    if (!inputs.you.birthDate) return 90;
-    const birthYear = parseInt(inputs.you.birthDate.split('-')[0], 10);
-    return isNaN(birthYear) ? 90 : (simStartYear + 34 - birthYear);
-  }, [inputs.you.birthDate, simStartYear]);
+  // Derive the global plan ending year and ending age from the active overview analysis ledger or inputs
+  const { globalEndingYear, endingAge, totalPlanYears } = useMemo(() => {
+    if (ledger && ledger.length > 0) {
+      const finalRow = ledger[ledger.length - 1];
+      const endYr = finalRow.year;
+      const endAge = finalRow.yourAge;
+      return {
+        globalEndingYear: endYr,
+        endingAge: endAge,
+        totalPlanYears: endYr - simStartYear + 1,
+      };
+    }
+
+    // Fallback if ledger is not provided
+    const yourBirthYear = inputs.you.birthDate ? parseInt(inputs.you.birthDate.split('-')[0], 10) : 1960;
+    const wifeBirthYear = inputs.wife.birthDate ? parseInt(inputs.wife.birthDate.split('-')[0], 10) : 1964;
+    const deathYear = yourBirthYear + (inputs.you.longevityAge ?? 85);
+    const wifeDeathYear = inputs.isSingleFiler ? 0 : (wifeBirthYear + (inputs.wife.longevityAge ?? 95));
+    const endYr = Math.max(simStartYear, inputs.isSingleFiler ? deathYear : Math.max(deathYear, wifeDeathYear));
+    const endAge = endYr - yourBirthYear;
+    return {
+      globalEndingYear: endYr,
+      endingAge: endAge,
+      totalPlanYears: endYr - simStartYear + 1,
+    };
+  }, [ledger, inputs, simStartYear]);
 
   // Trigger alert messages that auto-dismiss
   const triggerNotification = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
@@ -318,10 +347,8 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
     setNewPlanName('');
     triggerNotification(`Scenario "${name}" successfully saved!`, 'success');
 
-    // Auto-select as Plan A or Plan B if empty
-    if (!selectedPlanAId) {
-      setSelectedPlanAId(newPlan.id);
-    } else if (!selectedPlanBId) {
+    // Auto-select as Plan B if empty (Plan A defaults to current active plan)
+    if (!selectedPlanBId) {
       setSelectedPlanBId(newPlan.id);
     }
   };
@@ -335,15 +362,96 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
   // 3. Delete Plan
   const handleDeletePlan = (id: string, name: string) => {
     onSavePlans((prev) => prev.filter((p) => p.id !== id));
-    if (selectedPlanAId === id) setSelectedPlanAId('');
+    if (selectedPlanAId === id) setSelectedPlanAId('current');
     if (selectedPlanBId === id) setSelectedPlanBId('');
     triggerNotification(`Plan "${name}" deleted.`, 'info');
+  };
+
+  // 4. Export Saved Scenarios to JSON
+  const handleExportScenariosJSON = () => {
+    if (savedPlans.length === 0) {
+      triggerNotification('No saved scenarios to export.', 'info');
+      return;
+    }
+    const dataStr = JSON.stringify(savedPlans, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Retirement_Scenarios_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    triggerNotification(`Exported ${savedPlans.length} scenario(s) to JSON.`, 'success');
+  };
+
+  // 5. Import Scenarios from JSON
+  const handleImportScenariosJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        if (!text) return;
+        const parsed = JSON.parse(text);
+
+        let scenariosToImport: SavedPlan[] = [];
+        if (Array.isArray(parsed)) {
+          scenariosToImport = parsed;
+        } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.savedPlans)) {
+          scenariosToImport = parsed.savedPlans;
+        }
+
+        if (scenariosToImport.length === 0) {
+          triggerNotification('No valid scenarios found in this JSON file.', 'error');
+          return;
+        }
+
+        onSavePlans((prev) => {
+          const existingNames = new Set(prev.map((p) => p.name.toLowerCase()));
+          const existingIds = new Set(prev.map((p) => p.id));
+          const validNew = scenariosToImport.filter((p) => p && p.name && p.inputs);
+          const merged = [...prev];
+          let addedCount = 0;
+
+          for (const plan of validNew) {
+            let uniqueId = plan.id || Date.now().toString();
+            if (existingIds.has(uniqueId)) {
+              uniqueId = `${uniqueId}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+            }
+            let uniqueName = plan.name;
+            if (existingNames.has(uniqueName.toLowerCase())) {
+              uniqueName = `${plan.name} (Imported)`;
+            }
+            existingIds.add(uniqueId);
+            existingNames.add(uniqueName.toLowerCase());
+            merged.push({
+              ...plan,
+              id: uniqueId,
+              name: uniqueName,
+            });
+            addedCount++;
+          }
+          triggerNotification(`Successfully imported ${addedCount} scenario(s)!`, 'success');
+          return merged;
+        });
+      } catch (err) {
+        console.error('Import scenarios failed:', err);
+        triggerNotification('Failed to parse scenarios file. Please ensure it is a valid JSON file.', 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
 
   // Helpers to calculate lifetime statistics
   const calculateLifetimeMetrics = (ledger: SimulationResultRow[]) => {
     const lastRow = ledger[ledger.length - 1];
     const endingEstate = lastRow ? lastRow.totalPortfolioValue : 0;
+    const endingRoth = lastRow ? (lastRow.endYourRothIRA || 0) + (lastRow.endWifeRothIRA || 0) : 0;
     
     const federalTaxExcludingNiit = ledger.reduce((sum, r) => sum + Math.max(0, r.fedIncomeTax - r.niitTax), 0);
     const stateTax = ledger.reduce((sum, r) => sum + r.stateIncomeTax, 0);
@@ -359,15 +467,35 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
       irmaa,
       medicareBase,
       endingEstate,
+      endingRoth,
       niit,
       totalTax,
       totalExpenses
     };
   };
 
-  // Resolve Plan A and Plan B
-  const planA = useMemo(() => savedPlans.find((p) => p.id === selectedPlanAId), [savedPlans, selectedPlanAId]);
-  const planB = useMemo(() => savedPlans.find((p) => p.id === selectedPlanBId), [savedPlans, selectedPlanBId]);
+  // Dynamic representation of the Current Active Plan
+  const currentPlan: SavedPlan = useMemo(() => ({
+    id: 'current',
+    name: 'Current Active Plan',
+    inputs: {
+      ...inputs,
+      simulateSurvivor,
+    },
+    createdAt: 'Active Workspace',
+  }), [inputs, simulateSurvivor]);
+
+  // Resolve Plan A and Plan B (defaulting Plan A to current active plan if unset)
+  const effectivePlanAId = selectedPlanAId || 'current';
+  const planA = useMemo(() => {
+    if (effectivePlanAId === 'current') return currentPlan;
+    return savedPlans.find((p) => p.id === effectivePlanAId);
+  }, [savedPlans, effectivePlanAId, currentPlan]);
+
+  const planB = useMemo(() => {
+    if (selectedPlanBId === 'current') return currentPlan;
+    return savedPlans.find((p) => p.id === selectedPlanBId);
+  }, [savedPlans, selectedPlanBId, currentPlan]);
 
   // Helper to discount a row's nominal values back to today's purchasing power (real value)
   const discountRow = (row: SimulationResultRow): SimulationResultRow => {
@@ -386,20 +514,46 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
     return discounted;
   };
 
-  // Run dynamic simulations on standard flat returns
+  // Run dynamic simulations on active scenario returns ending on global plan ending year
   const simResultA = useMemo(() => {
     if (!planA) return null;
-    const rawResult = runRetirementSimulation(planA.inputs, simulateSurvivor, null);
+    if (planA.id === 'current' && ledger && ledger.length > 0) {
+      return ledger;
+    }
+    const inputsA: AppStateInputs = {
+      ...planA.inputs,
+      you: { ...planA.inputs.you, birthDate: inputs.you.birthDate, longevityAge: inputs.you.longevityAge },
+      wife: { ...planA.inputs.wife, birthDate: inputs.wife.birthDate, longevityAge: inputs.wife.longevityAge },
+      isSingleFiler: inputs.isSingleFiler,
+      simulationStartYear: inputs.simulationStartYear,
+    };
+    const simSurvivorA = (planA.inputs as { simulateSurvivor?: boolean })?.simulateSurvivor !== undefined 
+      ? (planA.inputs as { simulateSurvivor?: boolean }).simulateSurvivor!
+      : simulateSurvivor;
+    const rawResult = runRetirementSimulation(inputsA, simSurvivorA, activeSequence).filter((r) => r.year <= globalEndingYear);
     if (!useTodayDollars) return rawResult;
     return rawResult.map((r) => discountRow(r));
-  }, [planA, simulateSurvivor, useTodayDollars]);
+  }, [planA, simulateSurvivor, useTodayDollars, inputs, globalEndingYear, activeSequence, ledger]);
 
   const simResultB = useMemo(() => {
     if (!planB) return null;
-    const rawResult = runRetirementSimulation(planB.inputs, simulateSurvivor, null);
+    if (planB.id === 'current' && ledger && ledger.length > 0) {
+      return ledger;
+    }
+    const inputsB: AppStateInputs = {
+      ...planB.inputs,
+      you: { ...planB.inputs.you, birthDate: inputs.you.birthDate, longevityAge: inputs.you.longevityAge },
+      wife: { ...planB.inputs.wife, birthDate: inputs.wife.birthDate, longevityAge: inputs.wife.longevityAge },
+      isSingleFiler: inputs.isSingleFiler,
+      simulationStartYear: inputs.simulationStartYear,
+    };
+    const simSurvivorB = (planB.inputs as { simulateSurvivor?: boolean })?.simulateSurvivor !== undefined 
+      ? (planB.inputs as { simulateSurvivor?: boolean }).simulateSurvivor!
+      : simulateSurvivor;
+    const rawResult = runRetirementSimulation(inputsB, simSurvivorB, activeSequence).filter((r) => r.year <= globalEndingYear);
     if (!useTodayDollars) return rawResult;
     return rawResult.map((r) => discountRow(r));
-  }, [planB, simulateSurvivor, useTodayDollars]);
+  }, [planB, simulateSurvivor, useTodayDollars, inputs, globalEndingYear, activeSequence, ledger]);
 
   // Sum lifetime stats
   const statsA = useMemo(() => simResultA ? calculateLifetimeMetrics(simResultA) : null, [simResultA]);
@@ -421,7 +575,7 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
       {
         id: 'state',
         name: 'State Income Taxes',
-        desc: 'State taxes paid over 35 years based on Maryland vs Florida rules.',
+        desc: `State taxes paid over ${totalPlanYears} years based on Maryland vs Florida rules.`,
         valA: statsA.stateTax,
         valB: statsB.stateTax,
         lowerIsBetter: true,
@@ -451,15 +605,23 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
         lowerIsBetter: true,
       },
       {
+        id: 'endingRoth',
+        name: `Ending Roth IRA Balance (Age ${endingAge})`,
+        desc: `Final terminal tax-free Roth IRA balance in year ${globalEndingYear} for legacy inheritance or late-life expenditures.`,
+        valA: statsA.endingRoth,
+        valB: statsB.endingRoth,
+        lowerIsBetter: false,
+      },
+      {
         id: 'endingEstate',
-        name: `Net Portfolio Estate (Age ${endingAge})`,
-        desc: 'Final terminal value of combined accounts after all years of growth, taxes, and drawdowns.',
+        name: `Ending Net Estate (Age ${endingAge})`,
+        desc: `Final terminal value of combined accounts in year ${globalEndingYear} after all years of growth, taxes, and drawdowns under ${globalScenario ? globalScenario.toUpperCase() : 'active'} return assumptions.`,
         valA: statsA.endingEstate,
         valB: statsB.endingEstate,
         lowerIsBetter: false,
       },
     ];
-  }, [statsA, statsB, endingAge]);
+  }, [statsA, statsB, endingAge, globalEndingYear, totalPlanYears, globalScenario]);
 
   // Visual summary analysis
   const summaryInsight = useMemo(() => {
@@ -469,7 +631,7 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
     const estateDelta = statsB.endingEstate - statsA.endingEstate;
     const surchargeSavings = statsA.irmaa - statsB.irmaa;
 
-    const isIdentical = selectedPlanAId === selectedPlanBId || (Math.abs(taxSavings) < 0.1 && Math.abs(estateDelta) < 0.1);
+    const isIdentical = effectivePlanAId === selectedPlanBId || (Math.abs(taxSavings) < 0.1 && Math.abs(estateDelta) < 0.1);
 
     const isTaxFavorable = taxSavings > 0;
     const isEstateFavorable = estateDelta > 0;
@@ -539,7 +701,7 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
       estateDesc,
       isIdentical
     };
-  }, [statsA, statsB, planA, planB, selectedPlanAId, selectedPlanBId]);
+  }, [statsA, statsB, planA, planB, effectivePlanAId, selectedPlanBId]);
 
   return (
     <div className="space-y-3">
@@ -607,55 +769,99 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
               <h4 className="text-sm font-bold text-slate-200">
                 Saved Scenarios ({savedPlans.length})
               </h4>
-              {savedPlans.length > 0 && (
-                <div className="flex items-center gap-2">
-                  {!showClearConfirm ? (
-                    <button
-                      onClick={() => setShowClearConfirm(true)}
-                      className="text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1 font-bold font-sans transition-colors cursor-pointer"
-                    >
-                      Clear All
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-1.5 text-[10px]">
-                      <span className="text-slate-400 font-sans">Delete all?</span>
+              <div className="flex items-center gap-1.5">
+                <label
+                  title="Import scenarios from JSON file"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-emerald-400 text-xs font-semibold transition-colors cursor-pointer shadow-sm"
+                >
+                  <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Import</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportScenariosJSON}
+                    className="hidden"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={handleExportScenariosJSON}
+                  disabled={savedPlans.length === 0}
+                  title={savedPlans.length === 0 ? "No saved scenarios to export" : "Export scenarios to JSON file"}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-semibold transition-colors shadow-sm ${
+                    savedPlans.length === 0
+                      ? 'bg-slate-950/60 border-slate-800 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-900 hover:bg-slate-800 border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-blue-400 cursor-pointer'
+                  }`}
+                >
+                  <Download className={`w-3.5 h-3.5 ${savedPlans.length > 0 ? 'text-blue-400' : 'text-slate-600'}`} />
+                  <span>Export</span>
+                </button>
+                {savedPlans.length > 0 && (
+                  <div className="flex items-center gap-2 pl-1 border-l border-slate-800">
+                    {!showClearConfirm ? (
                       <button
-                        onClick={() => {
-                          onSavePlans([]);
-                          setSelectedPlanAId('');
-                          setSelectedPlanBId('');
-                          triggerNotification('All saved plans cleared.', 'info');
-                          setShowClearConfirm(false);
-                        }}
-                        className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
+                        onClick={() => setShowClearConfirm(true)}
+                        className="text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1 font-bold font-sans transition-colors cursor-pointer"
                       >
-                        Yes
+                        Clear
                       </button>
-                      <span className="text-slate-500">/</span>
-                      <button
-                        onClick={() => setShowClearConfirm(false)}
-                        className="text-slate-400 hover:text-slate-300 font-bold cursor-pointer"
-                      >
-                        No
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
+                    ) : (
+                      <div className="flex items-center gap-1.5 text-[10px]">
+                        <span className="text-slate-400 font-sans">Delete all?</span>
+                        <button
+                          onClick={() => {
+                            onSavePlans([]);
+                            setSelectedPlanAId('');
+                            setSelectedPlanBId('');
+                            triggerNotification('All saved plans cleared.', 'info');
+                            setShowClearConfirm(false);
+                          }}
+                          className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
+                        >
+                          Yes
+                        </button>
+                        <span className="text-slate-500">/</span>
+                        <button
+                          onClick={() => setShowClearConfirm(false)}
+                          className="text-slate-400 hover:text-slate-300 font-bold cursor-pointer"
+                        >
+                          No
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {savedPlans.length === 0 ? (
-              <div className="text-center py-8 bg-slate-950/20 rounded-xl border border-slate-800/40 border-dashed">
-                <AlertCircle className="w-6 h-6 text-slate-600 mx-auto mb-2" />
-                <p className="text-xs text-slate-500 font-medium">No plans saved yet.</p>
-                <p className="text-[10px] text-slate-600 max-w-[200px] mx-auto mt-1 leading-normal">
-                  Adjust inputs in the sidebar and click save above to record your first plan!
+              <div className="text-center py-6 px-3 bg-slate-950/20 rounded-xl border border-slate-800/40 border-dashed space-y-2">
+                <AlertCircle className="w-5 h-5 text-slate-600 mx-auto" />
+                <p className="text-xs text-slate-400 font-medium">No plans saved yet.</p>
+                <p className="text-[10px] text-slate-500 max-w-[220px] mx-auto leading-normal">
+                  Save current parameters above, or import scenarios from a JSON backup file.
                 </p>
+                <div className="pt-1">
+                  <label
+                    title="Import scenarios from JSON file"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-emerald-500/50 text-slate-300 hover:text-emerald-300 text-xs font-semibold transition-all cursor-pointer shadow-sm"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Import Scenarios JSON</span>
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleImportScenariosJSON}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               </div>
             ) : (
               <div className="space-y-3 max-h-[360px] overflow-y-auto custom-scrollbar pr-1">
                 {savedPlans.map((plan) => {
-                  const isA = selectedPlanAId === plan.id;
+                  const isA = effectivePlanAId === plan.id;
                   const isB = selectedPlanBId === plan.id;
                   
                   // Compute details
@@ -767,14 +973,18 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
               <div className="flex-1 space-y-1.5">
                 <label className="text-[10px] text-blue-400 font-bold uppercase tracking-wider block">Plan A (Baseline Scenario)</label>
                 <select
-                  value={selectedPlanAId}
+                  value={effectivePlanAId}
                   onChange={(e) => setSelectedPlanAId(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 focus:border-blue-500 text-xs px-3 py-2 rounded-xl text-slate-200 focus:outline-none"
                 >
-                  <option value="">-- Choose Plan A --</option>
-                  {savedPlans.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
+                  <option value="current">Current Active Plan</option>
+                  {savedPlans.length > 0 && (
+                    <optgroup label="Saved Scenarios">
+                      {savedPlans.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
 
@@ -791,9 +1001,14 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
                   className="w-full bg-slate-900 border border-slate-800 focus:border-emerald-500 text-xs px-3 py-2 rounded-xl text-slate-200 focus:outline-none"
                 >
                   <option value="">-- Choose Plan B --</option>
-                  {savedPlans.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
+                  <option value="current">Current Active Plan</option>
+                  {savedPlans.length > 0 && (
+                    <optgroup label="Saved Scenarios">
+                      {savedPlans.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
 
@@ -823,7 +1038,7 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="bg-slate-900/60 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
-                        <th className="py-5 px-6">Lifetime Category ({simStartYear} - {simStartYear + 34})</th>
+                        <th className="py-5 px-6">Lifetime Category ({simStartYear} - {globalEndingYear})</th>
                         <th className="py-5 px-5 text-right text-blue-300 font-bold bg-blue-500/5">Plan A: {planA.name}</th>
                         <th className="py-5 px-5 text-right text-emerald-300 font-bold bg-emerald-500/5">Plan B: {planB.name}</th>
                         <th className="py-5 px-5 text-right">Lifetime Delta</th>

@@ -198,6 +198,41 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     });
   }
 
+  async saveExpensesBatch(
+    expenses: Array<
+      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
+        expenseId?: string;
+        createdAt?: string;
+        updatedAt?: string;
+        syncStatus?: SyncStatus;
+      }
+    >
+  ): Promise<ActualExpense[]> {
+    if (expenses.length === 0) return [];
+    const db = await this.getDB();
+    const now = new Date().toISOString();
+    const records: ActualExpense[] = expenses.map(exp => ({
+      ...exp,
+      expenseId: exp.expenseId || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      syncStatus: exp.syncStatus || 'PENDING_SYNC',
+      createdAt: exp.createdAt || now,
+      updatedAt: exp.updatedAt || now,
+    }));
+
+    return new Promise<ActualExpense[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_EXPENSES, 'readwrite');
+      const store = tx.objectStore(STORE_EXPENSES);
+
+      for (const record of records) {
+        store.put(record);
+      }
+
+      tx.oncomplete = () => resolve(records);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
   async updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense> {
     const db = await this.getDB();
     const existing = await this.getExpenseById(id);
@@ -221,7 +256,7 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     });
   }
 
-  private async getExpenseById(id: string): Promise<ActualExpense | null> {
+  async getExpenseById(id: string): Promise<ActualExpense | null> {
     const db = await this.getDB();
     return new Promise<ActualExpense | null>((resolve, reject) => {
       const tx = db.transaction(STORE_EXPENSES, 'readonly');

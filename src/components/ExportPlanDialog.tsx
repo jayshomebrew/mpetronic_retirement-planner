@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppStateInputs, SimulationResultRow } from '../types';
+import { AppStateInputs, SavedPlan, SimulationResultRow } from '../types';
 import {
   X,
   Download,
@@ -32,6 +32,7 @@ interface ExportPlanDialogProps {
   onClose: () => void;
   inputs: AppStateInputs;
   simulateSurvivor?: boolean;
+  savedPlans?: SavedPlan[];
   ledger: SimulationResultRow[];
   initialFormat?: ExportFormatType;
 }
@@ -41,6 +42,7 @@ export const ExportPlanDialog: React.FC<ExportPlanDialogProps> = ({
   onClose,
   inputs,
   simulateSurvivor = false,
+  savedPlans = [],
   ledger,
   initialFormat = 'json',
 }) => {
@@ -96,7 +98,7 @@ export const ExportPlanDialog: React.FC<ExportPlanDialogProps> = ({
       let blob: Blob;
 
       if (selectedFormat === 'json') {
-        blob = generateJsonBlob(inputs, simulateSurvivor);
+        blob = generateJsonBlob(inputs, simulateSurvivor, savedPlans);
       } else if (selectedFormat === 'pdf') {
         blob = await generatePdfBlob(inputs);
       } else {

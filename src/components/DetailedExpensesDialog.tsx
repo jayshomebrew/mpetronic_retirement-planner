@@ -18,14 +18,22 @@ import {
   Globe,
   Filter,
   CheckSquare,
-  Square
+  Square,
+  HeartPulse,
+  Lock,
+  ExternalLink,
+  Calendar,
 } from 'lucide-react';
 import {
   DetailedExpensesState,
   ExpenseCatalog,
   ExpenseItemDefinition,
+  HealthcareConfig,
   normalizeDetailedExpenses
 } from '../types';
+import { BASE_MEDICARE_PART_B, BASE_MEDICARE_PART_D } from '../engine/taxRates2026';
+import { getStorageAdapter } from '../shared/storage';
+import { syncCustomCategoriesToPlanner } from '../shared/utils/plannerCategories';
 
 interface DetailedExpensesDialogProps {
   isOpen: boolean;
@@ -36,6 +44,10 @@ interface DetailedExpensesDialogProps {
   onSave: (expenses: DetailedExpensesState) => void;
   simStartYear?: number;
   relocationYear?: number | null;
+  youHealthcare?: HealthcareConfig;
+  wifeHealthcare?: HealthcareConfig;
+  isSingleFiler?: boolean;
+  onNavigateToHealthcare?: () => void;
 }
 
 export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
@@ -46,7 +58,11 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   detailedExpenses,
   onSave,
   simStartYear = 2026,
-  relocationYear = null
+  relocationYear = null,
+  youHealthcare,
+  wifeHealthcare,
+  isSingleFiler = false,
+  onNavigateToHealthcare,
 }) => {
   const [activeTab, setActiveTab] = useState<'expenses' | 'catalog'>('expenses');
 
@@ -80,6 +96,13 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   // Re-sync when dialog opens or props change
   useEffect(() => {
     if (isOpen) {
+      const adapter = getStorageAdapter();
+      adapter.getCategories().then((cats) => {
+        if (cats && cats.length > 0) {
+          syncCustomCategoriesToPlanner(cats);
+        }
+      }).catch(console.warn);
+
       const norm = normalizeDetailedExpenses(detailedExpenses);
       setCatalog(norm.catalog);
       const sList = norm.states && norm.states.length > 0 ? [...norm.states] : [currentState || 'MD', targetState || 'FL'];
@@ -105,9 +128,9 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const [editingItem, setEditingItem] = useState<ExpenseItemDefinition | null>(null);
   const [itemName, setItemName] = useState('');
   const [itemCategory, setItemCategory] = useState('Housing');
-  const [customCategoryInput, setCustomCategoryInput] = useState('');
   const [itemDescription, setItemDescription] = useState('');
   const [itemFrequency, setItemFrequency] = useState<number>(12);
+  const [itemDueMonths, setItemDueMonths] = useState<number[]>([]);
   const [itemIsOneTime, setItemIsOneTime] = useState<boolean>(false);
   const [itemTargetYear, setItemTargetYear] = useState<number | string>(simStartYear);
   const [itemScopeMode, setItemScopeMode] = useState<'ALL' | 'SPECIFIC'>('ALL');
@@ -213,10 +236,15 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
     if (item) {
       setEditingItem(item);
       setItemName(item.name);
-      setItemCategory(item.category);
+      const cat = item.isOneTime
+        ? (item.category === 'One-Time Setup Costs' || item.category === 'One-Time Expense' || !item.category ? 'One-Time Expenses' : item.category)
+        : (item.category || catalog.categories[0] || 'Living');
+      setItemCategory(cat);
       setItemDescription(item.description || '');
-      setItemFrequency(frequencies[item.id] ?? item.defaultFrequency ?? 12);
-      setItemIsOneTime(!!item.isOneTime);
+      const isOneTime = !!item.isOneTime || cat === 'One-Time Expenses' || cat === 'One-Time Expense' || cat === 'One-Time Setup Costs';
+      setItemIsOneTime(isOneTime);
+      setItemFrequency(frequencies[item.id] ?? item.defaultFrequency ?? (isOneTime ? 1 : 12));
+      setItemDueMonths(item.dueMonths ? [...item.dueMonths] : []);
       setItemTargetYear(item.targetYear ?? simStartYear);
       
       const appStates = item.applicableStates || ['ALL'];
@@ -239,10 +267,14 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
     } else {
       setEditingItem(null);
       setItemName('');
-      setItemCategory(defaultCat || catalog.categories[0] || 'Living');
+      const cat = defaultCat || catalog.categories[0] || 'Living';
+      const normalizedCat = (cat === 'One-Time Expense' || cat === 'One-Time Setup Costs') ? 'One-Time Expenses' : cat;
+      setItemCategory(normalizedCat);
       setItemDescription('');
-      setItemFrequency(12);
-      setItemIsOneTime(defaultCat === 'One-Time Setup Costs' || !!defaultYear);
+      const isOneTime = normalizedCat === 'One-Time Expenses' || !!defaultYear;
+      setItemFrequency(isOneTime ? 1 : 12);
+      setItemDueMonths([]);
+      setItemIsOneTime(isOneTime);
       setItemTargetYear(defaultYear ?? simStartYear);
       setItemScopeMode('ALL');
       setItemSelectedStates(statesList.length > 0 ? [...statesList] : [activeState]);
@@ -253,7 +285,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       });
       setItemCostsByState(stateMap);
     }
-    setCustomCategoryInput('');
     setItemModalOpen(true);
   };
 
@@ -270,21 +301,9 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       return;
     }
 
-    let finalCategory = itemCategory;
-    if (itemCategory === '__NEW__' || itemCategory === '+ Create New Category...') {
-      const trimmedCat = customCategoryInput.trim();
-      if (!trimmedCat) {
-        setItemError('Please provide a name for the new category.');
-        return;
-      }
-      finalCategory = trimmedCat;
-      if (!catalog.categories.includes(finalCategory)) {
-        setCatalog((prev) => ({
-          ...prev,
-          categories: [...prev.categories, finalCategory]
-        }));
-      }
-    }
+    const finalCategory = (itemCategory === 'One-Time Setup Costs' || itemCategory === 'One-Time Expense')
+      ? 'One-Time Expenses'
+      : itemCategory;
 
     const finalApplicableStates = itemScopeMode === 'ALL' 
       ? ['ALL'] 
@@ -304,6 +323,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 category: finalCategory,
                 description: itemDescription.trim() || undefined,
                 defaultFrequency: itemFrequency,
+                dueMonths: (itemFrequency < 12 || itemIsOneTime) && itemDueMonths.length > 0 ? itemDueMonths : undefined,
                 isOneTime: itemIsOneTime,
                 targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined,
                 applicableStates: finalApplicableStates
@@ -323,6 +343,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
         category: finalCategory,
         description: itemDescription.trim() || undefined,
         defaultFrequency: itemFrequency,
+        dueMonths: (itemFrequency < 12 || itemIsOneTime) && itemDueMonths.length > 0 ? itemDueMonths : undefined,
         isOneTime: itemIsOneTime,
         targetYear: itemIsOneTime ? (Number(itemTargetYear) || simStartYear) : undefined,
         applicableStates: finalApplicableStates
@@ -344,7 +365,10 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       const updated = { ...prev };
       statesList.forEach((st) => {
         const applies = finalApplicableStates.includes('ALL') || finalApplicableStates.includes(st);
-        const stateCost = applies ? (itemCostsByState[st] ?? itemBaseCost ?? 0) : 0;
+        const specifiedCost = itemCostsByState[st];
+        const stateCost = applies
+          ? (specifiedCost !== undefined && specifiedCost > 0 ? specifiedCost : (itemBaseCost || 0))
+          : 0;
         updated[st] = { ...(updated[st] || {}), [itemId]: stateCost };
       });
       return updated;
@@ -539,6 +563,18 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
     });
   }, [oneTimeItems, searchFilter, showAllStatesItems, activeState]);
 
+  // Category options for item modal: show all categories defined in the Expense Categories Manager
+  const categoryOptions = useMemo(() => {
+    const cats = [...catalog.categories];
+    if (!cats.includes('One-Time Expenses')) {
+      cats.push('One-Time Expenses');
+    }
+    if (itemCategory && !cats.includes(itemCategory)) {
+      cats.push(itemCategory);
+    }
+    return cats;
+  }, [catalog.categories, itemCategory]);
+
   const oneTimeItemsByYear = useMemo(() => {
     const groups: { [year: number]: ExpenseItemDefinition[] } = {};
     for (const item of visibleOneTimeItems) {
@@ -580,6 +616,113 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
       oneTime
     };
   }, [costs, activeState, recurringItems, oneTimeItems, frequencies]);
+
+  // Synchronized healthcare values for active state
+  const activeHealthcareSummary = useMemo(() => {
+    if (!youHealthcare && !wifeHealthcare) return null;
+
+    const youStateHc = youHealthcare ? ((youHealthcare as unknown as Record<string, unknown>)[activeState] as HealthcareConfig['MD'] | undefined || (activeState === 'MD' ? youHealthcare.MD : youHealthcare.FL)) : undefined;
+    const wifeStateHc = wifeHealthcare ? ((wifeHealthcare as unknown as Record<string, unknown>)[activeState] as HealthcareConfig['MD'] | undefined || (activeState === 'MD' ? wifeHealthcare.MD : wifeHealthcare.FL)) : undefined;
+
+    // Pre-65 monthly & annual
+    const youPre65Monthly = (youStateHc?.pre65MedicalPremium ?? 0) + (youStateHc?.pre65DentalPremium ?? 0) + (youStateHc?.pre65VisionPremium ?? 0);
+    const wifePre65Monthly = (!isSingleFiler && wifeStateHc) ? ((wifeStateHc?.pre65MedicalPremium ?? 0) + (wifeStateHc?.pre65DentalPremium ?? 0) + (wifeStateHc?.pre65VisionPremium ?? 0)) : 0;
+    const totalPre65Monthly = youPre65Monthly + wifePre65Monthly;
+    const totalPre65Annual = totalPre65Monthly * 12;
+
+    // Pre-65 OOP
+    const youPre65OOP = (youStateHc?.pre65MedicalOOP ?? 0) + (youStateHc?.pre65DentalOOP ?? 0) + (youStateHc?.pre65VisionOOP ?? 0);
+    const wifePre65OOP = (!isSingleFiler && wifeStateHc) ? ((wifeStateHc?.pre65MedicalOOP ?? 0) + (wifeStateHc?.pre65DentalOOP ?? 0) + (wifeStateHc?.pre65VisionOOP ?? 0)) : 0;
+    const totalPre65OOP = youPre65OOP + wifePre65OOP;
+
+    // Medicare Monthly & Annual
+    const youB = (youHealthcare?.medicarePartBPremium !== null && youHealthcare?.medicarePartBPremium !== undefined) ? youHealthcare.medicarePartBPremium : BASE_MEDICARE_PART_B;
+    const youD = (youStateHc?.medicarePartDPremium !== null && youStateHc?.medicarePartDPremium !== undefined) ? youStateHc.medicarePartDPremium : BASE_MEDICARE_PART_D;
+    const youMedMonthly = (youHealthcare ? (youB + youD) : 0) + (youStateHc?.supplementPremium ?? 0) + (youStateHc?.post65DentalPremium ?? 0) + (youStateHc?.post65VisionPremium ?? 0);
+
+    const wifeB = (wifeHealthcare?.medicarePartBPremium !== null && wifeHealthcare?.medicarePartBPremium !== undefined) ? wifeHealthcare.medicarePartBPremium : BASE_MEDICARE_PART_B;
+    const wifeD = (wifeStateHc?.medicarePartDPremium !== null && wifeStateHc?.medicarePartDPremium !== undefined) ? wifeStateHc.medicarePartDPremium : BASE_MEDICARE_PART_D;
+    const wifeMedMonthly = (!isSingleFiler && wifeHealthcare) ? ((wifeB + wifeD) + (wifeStateHc?.supplementPremium ?? 0) + (wifeStateHc?.post65DentalPremium ?? 0) + (wifeStateHc?.post65VisionPremium ?? 0)) : 0;
+
+    const totalMedicareMonthly = youMedMonthly + wifeMedMonthly;
+    const totalMedicareAnnual = totalMedicareMonthly * 12;
+
+    // Medicare OOP
+    const youMedOOP = (youStateHc?.medicarePartDDeductibleCopays ?? 0) + (youStateHc?.supplementOOP ?? 0) + (youStateHc?.post65HearingCare ?? 0) + (youStateHc?.post65DentalOOP ?? 0) + (youStateHc?.post65VisionOOP ?? 0);
+    const wifeMedOOP = (!isSingleFiler && wifeStateHc) ? ((wifeStateHc?.medicarePartDDeductibleCopays ?? 0) + (wifeStateHc?.supplementOOP ?? 0) + (wifeStateHc?.post65HearingCare ?? 0) + (wifeStateHc?.post65DentalOOP ?? 0) + (wifeStateHc?.post65VisionOOP ?? 0)) : 0;
+    const totalMedicareOOP = youMedOOP + wifeMedOOP;
+
+    const items = [
+      {
+        id: 'hc-pre65-premiums',
+        name: 'Pre-65 Health Insurance Premiums',
+        subtitle: isSingleFiler
+          ? `Primary: ${formatCurrency(youPre65Monthly)}/mo (Medical, Dental & Vision)`
+          : `Primary: ${formatCurrency(youPre65Monthly)}/mo | Spouse: ${formatCurrency(wifePre65Monthly)}/mo`,
+        description: `Pre-65 individual private health insurance coverage (Medical, Dental, Vision) for state of ${activeState}.`,
+        frequencyLabel: '12 / yr',
+        cost: totalPre65Monthly,
+        costLabel: `${formatCurrency(totalPre65Monthly)}/mo`,
+        annualized: totalPre65Annual,
+      },
+      {
+        id: 'hc-medicare-premiums',
+        name: 'Medicare & Medigap Premiums',
+        subtitle: isSingleFiler
+          ? `Base Part B (${formatCurrency(youB)}/mo) + Part D (${formatCurrency(youD)}/mo) + Medigap Supplement & Extras`
+          : `Primary: ${formatCurrency(youMedMonthly)}/mo | Spouse: ${formatCurrency(wifeMedMonthly)}/mo (Parts B & D, Medigap & Extras)`,
+        description: `Post-65 Medicare coverage for ${activeState} including Parts B & D, supplemental Medigap (e.g. Plan G/N), dental and vision.`,
+        frequencyLabel: '12 / yr',
+        cost: totalMedicareMonthly,
+        costLabel: `${formatCurrency(totalMedicareMonthly)}/mo`,
+        annualized: totalMedicareAnnual,
+      },
+      {
+        id: 'hc-pre65-oop',
+        name: 'Pre-65 Out-of-Pocket Maximum Allowance',
+        subtitle: isSingleFiler
+          ? `Annual max deductible & copays: ${formatCurrency(youPre65OOP)}`
+          : `Primary: ${formatCurrency(youPre65OOP)}/yr | Spouse: ${formatCurrency(wifePre65OOP)}/yr`,
+        description: `Modeled annual out-of-pocket maximums and deductibles for pre-65 health plans in ${activeState}.`,
+        frequencyLabel: '1 / yr',
+        cost: totalPre65OOP,
+        costLabel: `${formatCurrency(totalPre65OOP)}/yr`,
+        annualized: totalPre65OOP,
+      },
+      {
+        id: 'hc-medicare-oop',
+        name: 'Medicare Out-of-Pocket Annual Allowance',
+        subtitle: isSingleFiler
+          ? `Part D copays, Medigap deductible, hearing & dental OOP: ${formatCurrency(youMedOOP)}`
+          : `Primary: ${formatCurrency(youMedOOP)}/yr | Spouse: ${formatCurrency(wifeMedOOP)}/yr`,
+        description: `Modeled annual healthcare out-of-pocket maximums (Part D Rx, Part B deductible, hearing, dental, vision) in ${activeState}.`,
+        frequencyLabel: '1 / yr',
+        cost: totalMedicareOOP,
+        costLabel: `${formatCurrency(totalMedicareOOP)}/yr`,
+        annualized: totalMedicareOOP,
+      },
+    ];
+
+    return {
+      items,
+      totalPre65Monthly,
+      totalPre65Annual,
+      totalPre65OOP,
+      totalMedicareMonthly,
+      totalMedicareAnnual,
+      totalMedicareOOP,
+    };
+  }, [youHealthcare, wifeHealthcare, isSingleFiler, activeState]);
+
+  const showHealthcareCategory = useMemo(() => {
+    if (!activeHealthcareSummary) return false;
+    if (selectedCategoryFilter === 'ALL' || selectedCategoryFilter === 'Healthcare' || selectedCategoryFilter === 'Healthcare & Medicare') {
+      if (!searchFilter.trim()) return true;
+      const q = searchFilter.toLowerCase();
+      return 'healthcare'.includes(q) || 'medicare'.includes(q) || 'insurance'.includes(q) || 'premium'.includes(q) || 'oop'.includes(q) || 'dental'.includes(q) || 'vision'.includes(q);
+    }
+    return false;
+  }, [activeHealthcareSummary, selectedCategoryFilter, searchFilter]);
 
   if (!isOpen) return null;
 
@@ -709,16 +852,6 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                     <Copy className="w-3 h-3" />
                     Copy Costs...
                   </button>
-
-                  <div className="h-4 w-px bg-slate-800 mx-1" />
-
-                  <button
-                    onClick={() => handleOpenItemModal()}
-                    className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/20"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Add Line Item
-                  </button>
                 </div>
               </div>
 
@@ -746,6 +879,9 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                       className="bg-slate-950/60 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
                     >
                       <option value="ALL">All Categories</option>
+                      {activeHealthcareSummary && (
+                        <option value="Healthcare">Healthcare & Medicare (Synchronized)</option>
+                      )}
                       {catalog.categories.map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
@@ -765,25 +901,26 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
               </div>
 
               {/* Recurring Categories Groups */}
-              {catalog.items.length === 0 ? (
+              {catalog.categories.length === 0 ? (
                 <div className="p-8 text-center bg-slate-950/40 rounded-xl border border-slate-800/80 space-y-3 my-4">
                   <div className="w-12 h-12 rounded-full bg-slate-800/80 text-emerald-400 flex items-center justify-center mx-auto border border-slate-700/50">
-                    <Plus className="w-6 h-6" />
+                    <FolderPlus className="w-6 h-6" />
                   </div>
-                  <h4 className="text-sm font-bold text-slate-200">No Expense Line Items Configured</h4>
+                  <h4 className="text-sm font-bold text-slate-200">No Expense Categories Configured</h4>
                   <p className="text-xs text-slate-400 max-w-md mx-auto">
-                    Start from a clean slate by adding recurring living expenses or one-time outlays tailored to your retirement plan.
+                    Configure your expense categories and states in the Categories & States tab before adding expense line items.
                   </p>
                   <button
-                    onClick={() => handleOpenItemModal()}
+                    onClick={() => setActiveTab('catalog')}
                     className="px-4 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition-all inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/20 mt-2"
                   >
-                    <Plus className="w-4 h-4" />
-                    Add Your First Line Item
+                    <Layers className="w-4 h-4" />
+                    Open Categories & States
                   </button>
                 </div>
               ) : (
                 catalog.categories.map((catName) => {
+                  if (selectedCategoryFilter !== 'ALL' && selectedCategoryFilter !== catName) return null;
                   const catItems = visibleRecurringItems.filter((i) => i.category === catName);
                   if (catItems.length === 0) return null;
 
@@ -813,7 +950,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                             className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
                           >
                             <Plus className="w-3 h-3" />
-                            Add to {catName}
+                            Add Expense
                           </button>
                         </div>
                       </div>
@@ -823,7 +960,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                           <thead>
                             <tr className="border-b border-slate-800/50 text-[10px] text-slate-500 font-bold uppercase">
                               <th className="py-2 pr-4 w-5/12">Expense Name</th>
-                              <th className="py-2 px-2 text-center w-28">State Scope</th>
+                                <th className="py-2 px-2 text-center w-28">State Scope</th>
                               <th className="py-2 px-2 text-center w-28">Freq / Year</th>
                               <th className="py-2 px-2 text-right w-36">Budget Cost</th>
                               <th className="py-2 px-2 text-right w-36">Annualized</th>
@@ -850,6 +987,12 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                                   <td className="py-2 pr-4">
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                       <span className="text-slate-200 font-medium">{item.name}</span>
+                                      {item.dueMonths && item.dueMonths.length > 0 && (
+                                        <span className="text-[9px] font-semibold text-cyan-300 bg-cyan-950/70 px-1.5 py-0.5 rounded border border-cyan-500/30 flex items-center gap-0.5" title="Scheduled due month(s)">
+                                          <Calendar className="w-2.5 h-2.5" />
+                                          {item.dueMonths.map(m => ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1]).join(', ')}
+                                        </span>
+                                      )}
                                       {hasDifferingStateCosts && (
                                         <span className="text-[9px] font-semibold text-amber-400/90 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20" title="Cost varies across states">
                                           State Rates
@@ -950,24 +1093,24 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                   <div className="flex items-center gap-2">
                     <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider">
-                      One-Time Capital Outlays
+                      One-Time Expenses
                     </h4>
                     <span className="text-[10px] text-slate-500 font-mono">
                       ({visibleOneTimeItems.length} {visibleOneTimeItems.length === 1 ? 'item' : 'items'})
                     </span>
                   </div>
                   <button
-                    onClick={() => handleOpenItemModal(undefined, 'One-Time Setup Costs', relocationYear ?? simStartYear)}
+                    onClick={() => handleOpenItemModal(undefined, 'One-Time Expenses', relocationYear ?? simStartYear)}
                     className="text-[10px] font-semibold text-slate-400 hover:text-amber-300 flex items-center gap-1 transition-colors cursor-pointer"
                   >
                     <Plus className="w-3 h-3" />
-                    Add One-Time Outlay
+                    Add Expense
                   </button>
                 </div>
 
                 {visibleOneTimeItems.length === 0 ? (
                   <p className="text-xs text-slate-500 italic py-2">
-                    No one-time capital outlays configured for {activeState}. (e.g. moving costs, initial furnishings, golf cart purchase).
+                    No one-time expenses configured for {activeState}. (e.g. moving costs, initial furnishings, golf cart purchase).
                   </p>
                 ) : (
                   oneTimeItemsByYear.map(({ year, items }) => {
@@ -983,7 +1126,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                           <table className="w-full text-left border-collapse">
                             <thead>
                               <tr className="text-[10px] text-slate-500 font-bold uppercase">
-                                <th className="py-1 pr-4 w-6/12">Outlay Name</th>
+                                <th className="py-1 pr-4 w-6/12">Expense Name</th>
                                 <th className="py-1 px-2 text-center w-28">State Scope</th>
                                 <th className="py-1 px-2 text-right w-36">Budget Cost</th>
                                 <th className="py-1 pl-2 text-right w-16"></th>
@@ -1043,14 +1186,14 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                                         <button
                                           onClick={() => handleOpenItemModal(item)}
                                           className="p-1 text-slate-400 hover:text-amber-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
-                                          title="Edit Outlay"
+                                          title="Edit Expense"
                                         >
                                           <Edit2 className="w-3.5 h-3.5" />
                                         </button>
                                         <button
                                           onClick={() => handleDeleteItem(item.id)}
                                           className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-800 transition-colors cursor-pointer"
-                                          title="Delete Outlay"
+                                          title="Delete Expense"
                                         >
                                           <Trash2 className="w-3.5 h-3.5" />
                                         </button>
@@ -1065,6 +1208,115 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                       </div>
                     );
                   })
+                )}
+
+                {/* Synchronized Healthcare & Medicare Category */}
+                {showHealthcareCategory && activeHealthcareSummary && (
+                  <div className="space-y-2 bg-gradient-to-br from-emerald-950/20 via-slate-950/50 to-slate-950/40 p-4 rounded-xl border border-emerald-500/30 shadow-sm">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-slate-800 gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <div className="p-1 rounded-md bg-emerald-500/20 text-emerald-400">
+                          <HeartPulse className="w-3.5 h-3.5" />
+                        </div>
+                        <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                          Healthcare & Medicare
+                        </h4>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                          <Lock className="w-2.5 h-2.5" /> Synchronized
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-xs font-mono font-semibold text-slate-300">
+                          Subtotal ({activeState}):{' '}
+                          <span className="text-emerald-400 font-bold">
+                            {formatCurrency(activeHealthcareSummary.totalPre65Annual > 0 ? activeHealthcareSummary.totalPre65Annual : activeHealthcareSummary.totalMedicareAnnual)}/yr
+                          </span>
+                        </span>
+                        {onNavigateToHealthcare && (
+                          <button
+                            onClick={onNavigateToHealthcare}
+                            className="text-[10px] font-bold text-emerald-300 hover:text-emerald-200 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                            title="Jump to Healthcare & Medicare configuration worksheet"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            Edit Healthcare Parameters
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="min-w-full overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="border-b border-slate-800/50 text-[10px] text-slate-500 font-bold uppercase">
+                            <th className="py-2 pr-4 w-5/12">Healthcare Obligation</th>
+                            <th className="py-2 px-2 text-center w-28">State Scope</th>
+                            <th className="py-2 px-2 text-center w-28">Freq / Year</th>
+                            <th className="py-2 px-2 text-right w-36">Modeled Rate</th>
+                            <th className="py-2 px-2 text-right w-36">Annualized</th>
+                            <th className="py-2 pl-2 text-right w-16"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/20 text-xs">
+                          {activeHealthcareSummary.items.map((item) => (
+                            <tr key={item.id} className="hover:bg-slate-900/50 transition-colors group">
+                              <td className="py-2 pr-4">
+                                <div className="flex flex-col">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-slate-200 font-medium">{item.name}</span>
+                                    <span className="text-[9px] font-semibold text-emerald-400/90 bg-emerald-400/10 px-1.5 py-0.5 rounded border border-emerald-400/20">
+                                      Worksheet Sync
+                                    </span>
+                                    {item.description && (
+                                      <div className="relative group/tip cursor-help">
+                                        <Info className="w-3.5 h-3.5 text-slate-500 hover:text-slate-300 transition-colors" />
+                                        <div className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block bg-slate-800 text-slate-200 text-[11px] p-2 rounded-lg shadow-lg max-w-xs z-30 border border-slate-700 pointer-events-none">
+                                          {item.description}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <span className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                    {item.subtitle}
+                                  </span>
+                                </div>
+                              </td>
+
+                              <td className="py-2 px-2 text-center">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                                  <MapPin className="w-2.5 h-2.5" /> {activeState}
+                                </span>
+                              </td>
+
+                              <td className="py-2 px-2 text-center font-mono text-slate-300 text-xs">
+                                {item.frequencyLabel}
+                              </td>
+
+                              <td className="py-2 px-2 text-right font-mono text-xs">
+                                <div className="inline-flex items-center justify-end gap-1 px-2.5 py-1 bg-slate-900/80 border border-slate-800 rounded text-slate-300">
+                                  <Lock className="w-2.5 h-2.5 text-slate-500" />
+                                  <span>{item.costLabel}</span>
+                                </div>
+                              </td>
+
+                              <td className="py-2 px-2 text-right font-mono font-bold text-emerald-400 text-xs">
+                                {formatCurrency(item.annualized)}
+                              </td>
+
+                              <td className="py-2 pl-2 text-right">
+                                <div className="relative group/lock cursor-help inline-flex items-center justify-end">
+                                  <Lock className="w-3.5 h-3.5 text-slate-500 hover:text-emerald-400 transition-colors" />
+                                  <div className="absolute right-0 bottom-full mb-1 hidden group-hover/lock:block bg-slate-800 text-slate-200 text-[10px] p-1.5 rounded-md shadow-lg whitespace-nowrap z-30 border border-slate-700 pointer-events-none">
+                                    Synced from Healthcare & Medicare
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -1150,6 +1402,16 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                         </div>
                         <div className="flex items-center gap-1">
                           <button
+                            onClick={() => {
+                              setActiveTab('expenses');
+                              handleOpenItemModal(undefined, cat);
+                            }}
+                            className="p-1 text-slate-400 hover:text-emerald-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                            title={`Add Expense to ${cat}`}
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => handleOpenCategoryModal(cat)}
                             className="p-1 text-slate-400 hover:text-emerald-300 rounded hover:bg-slate-800 transition-colors cursor-pointer"
                             title="Rename Category"
@@ -1177,7 +1439,7 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
 
         {/* Footer Summary & Actions */}
         <div className="p-4 bg-slate-950 border-t border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-6 text-xs">
+          <div className="flex flex-wrap items-center gap-4 md:gap-6 text-xs">
             <div className="flex items-center gap-2">
               <span className="text-slate-400">Viewing State:</span>
               <span className="font-bold text-emerald-400 font-mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">
@@ -1185,20 +1447,31 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
               </span>
             </div>
             <div>
-              <span className="text-slate-400">Monthly Living:</span>{' '}
+              <span className="text-slate-400">Lifestyle Living:</span>{' '}
               <span className="font-bold font-mono text-slate-200">
                 {formatCurrency(activeStateTotals.recurringMonthly)}/mo
+              </span>{' '}
+              <span className="font-bold font-mono text-emerald-400">
+                ({formatCurrency(activeStateTotals.recurringAnnual)}/yr)
               </span>
             </div>
+            {activeHealthcareSummary && (
+              <div title="Synchronized from Healthcare & Medicare worksheet for active state">
+                <span className="text-slate-400">Healthcare ({activeState}):</span>{' '}
+                <span className="font-bold font-mono text-cyan-400">
+                  +{formatCurrency(activeHealthcareSummary.totalPre65Annual > 0 ? activeHealthcareSummary.totalPre65Annual : activeHealthcareSummary.totalMedicareAnnual)}/yr
+                </span>
+              </div>
+            )}
             <div>
-              <span className="text-slate-400">Annualized Living:</span>{' '}
-              <span className="font-bold font-mono text-emerald-400">
-                {formatCurrency(activeStateTotals.recurringAnnual)}/yr
+              <span className="text-slate-400">Total Planned Budget:</span>{' '}
+              <span className="font-bold font-mono text-emerald-300">
+                {formatCurrency(activeStateTotals.recurringAnnual + (activeHealthcareSummary ? (activeHealthcareSummary.totalPre65Annual > 0 ? activeHealthcareSummary.totalPre65Annual : activeHealthcareSummary.totalMedicareAnnual) : 0))}/yr
               </span>
             </div>
             {activeStateTotals.oneTime > 0 && (
               <div>
-                <span className="text-slate-400">One-Time Outlays:</span>{' '}
+                <span className="text-slate-400">One-Time Expenses:</span>{' '}
                 <span className="font-bold font-mono text-amber-400">
                   {formatCurrency(activeStateTotals.oneTime)}
                 </span>
@@ -1263,13 +1536,22 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                   <label className="block text-slate-300 font-semibold mb-1">Category</label>
                   <select
                     value={itemCategory}
-                    onChange={(e) => setItemCategory(e.target.value)}
+                    onChange={(e) => {
+                      const newCat = e.target.value;
+                      setItemCategory(newCat);
+                      if (newCat === 'One-Time Expenses' || newCat === 'One-Time Setup Costs' || newCat === 'One-Time Expense') {
+                        setItemIsOneTime(true);
+                        setItemFrequency(1);
+                      } else if (itemCategory === 'One-Time Expenses' || itemCategory === 'One-Time Setup Costs' || itemCategory === 'One-Time Expense') {
+                        setItemIsOneTime(false);
+                        setItemFrequency(12);
+                      }
+                    }}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500/50"
                   >
-                    {catalog.categories.map((c) => (
+                    {categoryOptions.map((c) => (
                       <option key={c} value={c}>{c}</option>
                     ))}
-                    <option value="__NEW__">+ Create New Category...</option>
                   </select>
                 </div>
 
@@ -1291,16 +1573,56 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                 </div>
               </div>
 
-              {itemCategory === '__NEW__' && (
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">New Category Name *</label>
-                  <input
-                    type="text"
-                    value={customCategoryInput}
-                    onChange={(e) => setCustomCategoryInput(e.target.value)}
-                    placeholder="Enter custom category name..."
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-emerald-500/50"
-                  />
+              {/* Scheduled Due Months Selector for Non-Monthly Expenses */}
+              {(itemFrequency < 12 || itemIsOneTime) && (
+                <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-slate-300 font-semibold text-xs flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                        Scheduled Due Month(s) <span className="text-slate-500 font-normal text-[10px]">(Optional)</span>
+                      </label>
+                      <span className="text-[11px] text-slate-400">
+                        Specify which month(s) this expense is paid to level cash flow budget benchmarks (e.g. Sep &amp; Dec for taxes, Aug for insurance).
+                      </span>
+                    </div>
+                    {itemDueMonths.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setItemDueMonths([])}
+                        className="text-[10px] text-slate-400 hover:text-slate-200 underline cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-6 sm:grid-cols-12 gap-1.5 pt-1">
+                    {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((mName, idx) => {
+                      const mNum = idx + 1;
+                      const isSelected = itemDueMonths.includes(mNum);
+                      return (
+                        <button
+                          key={mNum}
+                          type="button"
+                          onClick={() => {
+                            if (isSelected) {
+                              setItemDueMonths((prev) => prev.filter((m) => m !== mNum));
+                            } else {
+                              setItemDueMonths((prev) => [...prev, mNum].sort((a, b) => a - b));
+                            }
+                          }}
+                          className={`py-1 text-center text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow font-black'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-850'
+                          }`}
+                        >
+                          {mName}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -1388,12 +1710,24 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                   <input
                     type="number"
                     min="0"
-                    step="1"
+                    step="any"
                     value={itemBaseCost || ''}
                     placeholder="0"
                     onChange={(e) => {
-                      const val = Number(e.target.value) || 0;
+                      const val = e.target.value === '' ? 0 : Number(e.target.value);
                       setItemBaseCost(val);
+                      setItemCostsByState((prev) => {
+                        const updated: Record<string, number> = {};
+                        statesList.forEach((st) => {
+                          const prevCost = prev[st];
+                          if (prevCost !== undefined && prevCost !== itemBaseCost && prevCost > 0) {
+                            updated[st] = prevCost;
+                          } else {
+                            updated[st] = val;
+                          }
+                        });
+                        return updated;
+                      });
                     }}
                     className="w-full pl-7 pr-3 py-2 bg-slate-900 border border-slate-700/60 rounded-lg text-slate-100 font-mono text-xs focus:outline-none focus:border-emerald-500/50"
                   />
@@ -1418,11 +1752,11 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                           <input
                             type="number"
                             min="0"
-                            step="1"
-                            value={itemCostsByState[st] ?? itemBaseCost ?? ''}
+                            step="any"
+                            value={itemCostsByState[st] !== undefined && itemCostsByState[st] > 0 ? itemCostsByState[st] : (itemBaseCost || '')}
                             placeholder={String(itemBaseCost || 0)}
                             onChange={(e) => {
-                              const val = Number(e.target.value) || 0;
+                              const val = e.target.value === '' ? 0 : Number(e.target.value);
                               setItemCostsByState((prev) => ({
                                 ...prev,
                                 [st]: val
@@ -1445,10 +1779,20 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
                     <input
                       type="checkbox"
                       checked={itemIsOneTime}
-                      onChange={(e) => setItemIsOneTime(e.target.checked)}
-                      className="rounded bg-slate-950 border-slate-700 text-amber-500 focus:ring-0"
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setItemIsOneTime(checked);
+                        if (checked && itemCategory !== 'One-Time Expenses') {
+                          setItemCategory('One-Time Expenses');
+                          setItemFrequency(1);
+                        } else if (!checked && (itemCategory === 'One-Time Expenses' || itemCategory === 'One-Time Setup Costs' || itemCategory === 'One-Time Expense')) {
+                          setItemCategory(catalog.categories[0] || 'Housing');
+                          setItemFrequency(12);
+                        }
+                      }}
+                      className="rounded bg-slate-950 border-slate-700 text-amber-500 focus:ring-0 cursor-pointer"
                     />
-                    <span>One-Time Outlay</span>
+                    <span>One-Time Expenses</span>
                   </label>
                 </div>
 

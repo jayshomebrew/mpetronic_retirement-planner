@@ -29,11 +29,14 @@ import {
   LogIn,
   LogOut,
   Info,
+  Pencil,
+  Check,
 } from 'lucide-react';
 import { getStorageAdapter } from '../../shared/storage';
 import { ActualExpense, ExpenseCategory } from '../../shared/types/expenses';
 import { resolveLoggedInPayerName } from '../../shared/utils/profileNames';
 import { AuthService } from '../../shared/auth/AuthService';
+import { isLocalhostEnvironment } from '../../shared/utils/appMode';
 import { CloudAuthModal } from '../../components/CloudAuthModal';
 import { AboutDialog } from '../../components/AboutDialog';
 import { getVersionInfo } from '../../utils/version';
@@ -100,6 +103,28 @@ export const ExpenserApp: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
   const versionInfo = useMemo(() => getVersionInfo(), []);
 
+  const storageSyncMessage = useMemo(() => {
+    if (isLocalhostEnvironment()) {
+      return 'Saved changes will update your local browser storage.';
+    }
+    if (isAuthenticated) {
+      return 'Saved changes will synchronize directly to your cloud storage.';
+    }
+    return 'Saved changes will update your expense ledger.';
+  }, [isAuthenticated]);
+
+  // Selection and editing state for Recent Expenses
+  const [selectedExpenseIds, setSelectedExpenseIds] = useState<string[]>([]);
+  const [editingExpense, setEditingExpense] = useState<ActualExpense | null>(null);
+  const [editAmountStr, setEditAmountStr] = useState<string>('');
+  const [editDate, setEditDate] = useState<string>('');
+  const [editCategoryId, setEditCategoryId] = useState<string>('');
+  const [editCategoryQuery, setEditCategoryQuery] = useState<string>('');
+  const [isEditCategoryPickerOpen, setIsEditCategoryPickerOpen] = useState<boolean>(false);
+  const [editNotes, setEditNotes] = useState<string>('');
+  const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   // New Category Modal form
   const [newCatGroup, setNewCatGroup] = useState<string>('Living');
   const [newCatName, setNewCatName] = useState<string>('');
@@ -127,6 +152,18 @@ export const ExpenserApp: React.FC = () => {
   useEffect(() => {
     setHighlightedIndex(0);
   }, [filteredCatalogItems]);
+
+  // Filtered Catalog Items for Edit Modal
+  const filteredEditCatalogItems = useMemo(() => {
+    const query = editCategoryQuery.trim().toLowerCase();
+    if (!query) return allCatalogItems;
+    return allCatalogItems.filter(item => {
+      const full = `${item.groupCategory} ${item.name} ${item.displayName}`.toLowerCase();
+      return full.includes(query);
+    });
+  }, [allCatalogItems, editCategoryQuery]);
+
+  const editSelectedCategoryObj = allCatalogItems.find(c => c.id === editCategoryId);
 
   // Keyboard Navigation for Category Search
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -429,11 +466,106 @@ export const ExpenserApp: React.FC = () => {
     setIsCategorySearchOpen(false);
   };
 
-  // Delete Expense
+  // Toggle selection for bulk actions
+  const handleToggleSelectExpense = (id: string) => {
+    setSelectedExpenseIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAllExpenses = () => {
+    if (selectedExpenseIds.length === recentExpenses.length) {
+      setSelectedExpenseIds([]);
+    } else {
+      setSelectedExpenseIds(recentExpenses.map(e => e.expenseId));
+    }
+  };
+
+  // Delete Expense (single)
   const handleDeleteExpense = async (id: string) => {
     if (window.confirm('Delete this expense?')) {
       await adapter.deleteExpense(id);
+      setSelectedExpenseIds(prev => prev.filter(item => item !== id));
+      if (editingExpense?.expenseId === id) {
+        setEditingExpense(null);
+      }
       await loadData();
+    }
+  };
+
+  // Delete Selected Expenses (bulk)
+  const handleDeleteSelectedExpenses = async () => {
+    if (selectedExpenseIds.length === 0) return;
+    const count = selectedExpenseIds.length;
+    if (window.confirm(`Delete ${count} selected expense${count > 1 ? 's' : ''}?`)) {
+      for (const id of selectedExpenseIds) {
+        await adapter.deleteExpense(id);
+      }
+      setSelectedExpenseIds([]);
+      if (editingExpense && selectedExpenseIds.includes(editingExpense.expenseId)) {
+        setEditingExpense(null);
+      }
+      await loadData();
+    }
+  };
+
+  // Start editing an expense
+  const handleStartEditExpense = (exp: ActualExpense) => {
+    setEditingExpense(exp);
+    setEditAmountStr(exp.amount.toFixed(2));
+    setEditDate(exp.date);
+    setEditCategoryId(exp.categoryId);
+    setEditCategoryQuery('');
+    setIsEditCategoryPickerOpen(false);
+    setEditNotes(exp.notes || '');
+    setEditError(null);
+  };
+
+  // Save edited expense
+  const handleSaveEditExpense = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editingExpense) return;
+
+    const parsedAmount = parseFloat(editAmountStr);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      setEditError('Please enter a valid amount greater than $0.00');
+      return;
+    }
+
+    if (!editDate) {
+      setEditError('Please select a valid date');
+      return;
+    }
+
+    if (!editCategoryId) {
+      setEditError('Please select a category');
+      return;
+    }
+
+    const targetCategory = allCatalogItems.find(c => c.id === editCategoryId);
+    const catName = targetCategory ? (targetCategory.displayName || targetCategory.name) : editingExpense.categoryName;
+
+    setIsSavingEdit(true);
+    setEditError(null);
+
+    try {
+      await adapter.updateExpense(editingExpense.expenseId, {
+        amount: Math.round(parsedAmount * 100) / 100,
+        date: editDate,
+        categoryId: editCategoryId,
+        categoryName: catName,
+        notes: editNotes.trim() || undefined,
+      });
+
+      await loadData();
+      setEditingExpense(null);
+      setShowSuccessBadge(true);
+      setTimeout(() => setShowSuccessBadge(false), 2500);
+    } catch (err: unknown) {
+      console.error('Failed to update expense:', err);
+      setEditError(err instanceof Error ? err.message : 'Failed to update expense');
+    } finally {
+      setIsSavingEdit(false);
     }
   };
 
@@ -957,68 +1089,399 @@ export const ExpenserApp: React.FC = () => {
       {showRecentModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex flex-col justify-end sm:justify-center p-0 sm:p-4 animate-in fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-3xl max-h-[85vh] flex flex-col max-w-md w-full mx-auto shadow-2xl overflow-hidden">
+            {/* Header: Normal or Multi-Select Action Bar */}
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <History className="w-5 h-5 text-emerald-400" />
-                <h2 className="text-base font-bold text-white">Recent Transactions</h2>
-              </div>
-              <button
-                onClick={() => setShowRecentModal(false)}
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              {selectedExpenseIds.length > 0 ? (
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      {selectedExpenseIds.length} selected
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSelectAllExpenses}
+                      className="text-xs text-slate-400 hover:text-white underline cursor-pointer"
+                    >
+                      {selectedExpenseIds.length === recentExpenses.length ? 'Deselect all' : 'Select all'}
+                    </button>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={handleDeleteSelectedExpenses}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-semibold cursor-pointer transition-colors"
+                      title="Delete selected entries"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete ({selectedExpenseIds.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExpenseIds([])}
+                      className="p-1 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+                      title="Cancel selection"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center space-x-2">
+                    <History className="w-5 h-5 text-emerald-400" />
+                    <h2 className="text-base font-bold text-white">Recent Transactions</h2>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 font-medium">
+                      {recentExpenses.length}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRecentModal(false);
+                      setSelectedExpenseIds([]);
+                    }}
+                    className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </div>
 
-            <div className="p-4 overflow-y-auto space-y-2 flex-1 divide-y divide-slate-800/60">
+            <div className="p-4 overflow-y-auto space-y-2 flex-1 divide-y divide-slate-800/60 custom-scrollbar">
               {recentExpenses.length === 0 ? (
                 <div className="text-center py-10 text-slate-500 text-sm">
                   No expenses logged yet.
                 </div>
               ) : (
-                recentExpenses.map(exp => (
-                  <div key={exp.expenseId} className="pt-2.5 first:pt-0 flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center space-x-1.5">
-                        <span className="font-semibold text-sm text-white">${exp.amount.toFixed(2)}</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-medium">
-                          {exp.categoryName}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5 flex items-center space-x-2">
-                        <span>{exp.date}</span>
-                        <span>•</span>
-                        <span>{exp.enteredBy}</span>
-                        {exp.notes && (
-                          <>
+                recentExpenses.map(exp => {
+                  const isSelected = selectedExpenseIds.includes(exp.expenseId);
+                  return (
+                    <div
+                      key={exp.expenseId}
+                      className={`pt-2.5 pb-2.5 px-2 first:pt-1 rounded-xl flex items-center justify-between transition-colors ${
+                        isSelected
+                          ? 'bg-emerald-500/10 border border-emerald-500/30'
+                          : 'hover:bg-slate-800/40 border border-transparent'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3 min-w-0 flex-1">
+                        {/* Selection Checkbox */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSelectExpense(exp.expenseId)}
+                          className={`w-5 h-5 rounded-md flex items-center justify-center border transition-all cursor-pointer shrink-0 ${
+                            isSelected
+                              ? 'bg-emerald-500 border-emerald-400 text-slate-950'
+                              : 'bg-slate-950 border-slate-700 hover:border-slate-500 text-transparent'
+                          }`}
+                          title={isSelected ? 'Deselect' : 'Select'}
+                        >
+                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                        </button>
+
+                        {/* Transaction Details (clickable to Edit) */}
+                        <div
+                          onClick={() => handleStartEditExpense(exp)}
+                          className="min-w-0 flex-1 cursor-pointer"
+                        >
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-semibold text-sm text-white">${exp.amount.toFixed(2)}</span>
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-medium truncate max-w-[150px]">
+                              {exp.categoryName}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5 flex items-center space-x-2">
+                            <span>{exp.date}</span>
                             <span>•</span>
-                            <span className="text-amber-300 truncate max-w-[140px]">{exp.notes}</span>
-                          </>
-                        )}
+                            <span>{exp.enteredBy}</span>
+                            {exp.notes && (
+                              <>
+                                <span>•</span>
+                                <span className="text-amber-300 truncate max-w-[130px]">{exp.notes}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Row Action Buttons */}
+                      <div className="flex items-center space-x-1 shrink-0 ml-2">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditExpense(exp)}
+                          className="p-2 text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-colors cursor-pointer"
+                          title="Edit transaction"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteExpense(exp.expenseId)}
+                          className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                          title="Delete entry"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
-
-                    <button
-                      onClick={() => handleDeleteExpense(exp.expenseId)}
-                      className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
-                      title="Delete entry"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
             <div className="p-4 bg-slate-950/60 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
               <span>{recentExpenses.length} transactions stored locally</span>
               <button
-                onClick={() => setShowRecentModal(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium"
+                type="button"
+                onClick={() => {
+                  setShowRecentModal(false);
+                  setSelectedExpenseIds([]);
+                }}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium cursor-pointer"
               >
                 Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Expense Modal */}
+      {editingExpense && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-white">Edit Expense</h2>
+                  <p className="text-[10px] text-slate-400">Update details & save changes</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingExpense(null)}
+                className="p-1 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {editError && (
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-1.5">
+                <X className="w-3.5 h-3.5 shrink-0" />
+                <span>{editError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEditExpense} className="space-y-3.5">
+              {/* Amount */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Amount ($) *
+                </label>
+                <div className="relative flex items-center bg-slate-950 border border-slate-800 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500 rounded-xl px-3 py-2 transition-all">
+                  <span className="text-emerald-400 font-bold text-base mr-1.5">$</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={editAmountStr}
+                    onChange={e => setEditAmountStr(e.target.value)}
+                    className="w-full bg-transparent text-lg font-bold text-white focus:outline-none"
+                    placeholder="0.00"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Date */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    Date *
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setEditDate(new Date().toISOString().split('T')[0])}
+                      className="text-[10px] text-emerald-400 hover:text-emerald-300 font-medium px-1.5 py-0.5 bg-emerald-500/10 rounded cursor-pointer"
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const y = new Date();
+                        y.setDate(y.getDate() - 1);
+                        setEditDate(y.toISOString().split('T')[0]);
+                      }}
+                      className="text-[10px] text-slate-400 hover:text-slate-200 font-medium px-1.5 py-0.5 bg-slate-800 rounded cursor-pointer"
+                    >
+                      Yesterday
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center bg-slate-950 border border-slate-800 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500 rounded-xl px-3 py-2 transition-all">
+                  <Calendar className="w-4 h-4 text-slate-500 mr-2 shrink-0" />
+                  <input
+                    type="date"
+                    value={editDate}
+                    onChange={e => setEditDate(e.target.value)}
+                    className="w-full bg-transparent text-xs text-white focus:outline-none [color-scheme:dark]"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Category */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Category *
+                </label>
+                {!isEditCategoryPickerOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditCategoryPickerOpen(true)}
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 flex items-center justify-between text-left transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <span
+                        className="w-3 h-3 rounded-full shrink-0"
+                        style={{ backgroundColor: editSelectedCategoryObj?.color || '#10b981' }}
+                      />
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-white truncate">
+                          {editSelectedCategoryObj?.displayName || editSelectedCategoryObj?.name || editingExpense.categoryName}
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          {editSelectedCategoryObj?.groupCategory || 'Expense Line Item'}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-medium text-emerald-400 group-hover:text-emerald-300 shrink-0">
+                      Change
+                    </span>
+                  </button>
+                ) : (
+                  <div className="space-y-2 p-2 bg-slate-950 rounded-2xl border border-slate-800">
+                    <div className="relative flex items-center bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5">
+                      <Search className="w-3.5 h-3.5 text-slate-500 mr-1.5 shrink-0" />
+                      <input
+                        type="text"
+                        value={editCategoryQuery}
+                        onChange={e => setEditCategoryQuery(e.target.value)}
+                        placeholder="Search categories..."
+                        className="w-full bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none"
+                        autoFocus
+                      />
+                      {editCategoryQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setEditCategoryQuery('')}
+                          className="p-0.5 text-slate-400 hover:text-white"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-40 overflow-y-auto divide-y divide-slate-800/60 custom-scrollbar pr-1">
+                      {filteredEditCatalogItems.length === 0 ? (
+                        <div className="py-3 text-center text-xs text-slate-500">
+                          No matching categories
+                        </div>
+                      ) : (
+                        filteredEditCatalogItems.map(cat => {
+                          const isCatSelected = cat.id === editCategoryId;
+                          return (
+                            <button
+                              key={cat.id}
+                              type="button"
+                              onClick={() => {
+                                setEditCategoryId(cat.id);
+                                setIsEditCategoryPickerOpen(false);
+                              }}
+                              className={`w-full p-2 text-left rounded-lg flex items-center justify-between text-xs transition-colors cursor-pointer ${
+                                isCatSelected
+                                  ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                                  : 'hover:bg-slate-900 text-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2 truncate">
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                                  style={{ backgroundColor: cat.color || '#3b82f6' }}
+                                />
+                                <span className="truncate">{cat.displayName || cat.name}</span>
+                              </div>
+                              <span className="text-[10px] text-slate-500 uppercase tracking-wider shrink-0 ml-1">
+                                {cat.groupCategory}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Note / Memo (Optional)
+                </label>
+                <div className="flex items-center bg-slate-950 border border-slate-800 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500 rounded-xl px-3 py-2 transition-all">
+                  <FileText className="w-4 h-4 text-slate-500 mr-2 shrink-0" />
+                  <input
+                    type="text"
+                    value={editNotes}
+                    onChange={e => setEditNotes(e.target.value)}
+                    placeholder="e.g. Costco grocery haul"
+                    maxLength={200}
+                    className="w-full bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Cloud Sync info */}
+              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                <Cloud className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>{storageSyncMessage}</span>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setEditingExpense(null)}
+                  disabled={isSavingEdit}
+                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {isSavingEdit ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Save Changes</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

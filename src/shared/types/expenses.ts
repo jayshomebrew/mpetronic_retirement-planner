@@ -71,12 +71,19 @@ export interface StorageAdapter {
 
   getExpenses(year: number, month?: number): Promise<ActualExpense[]>;
   getRecentExpenses(limit?: number): Promise<ActualExpense[]>;
+  getExpenseById?(id: string): Promise<ActualExpense | null>;
   saveExpense(expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
     expenseId?: string;
     createdAt?: string;
     updatedAt?: string;
     syncStatus?: SyncStatus;
   }): Promise<ActualExpense>;
+  saveExpensesBatch?(expenses: Array<Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
+    expenseId?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    syncStatus?: SyncStatus;
+  }>): Promise<ActualExpense[]>;
   updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense>;
   deleteExpense(id: string): Promise<void>;
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   SimulationResultRow,
   AppStateInputs,
@@ -32,13 +32,30 @@ import {
   Smartphone,
   ExternalLink,
   Tag,
+  Pencil,
+  Search,
+  ArrowUpDown,
+  Check,
+  X,
+  ArrowUp,
+  ArrowDown,
+  ArrowRight,
+  BarChart3,
+  Table,
+  EyeOff,
+  Upload,
 } from 'lucide-react';
 import { getStorageAdapter } from '../shared/storage';
 import { ActualExpense } from '../shared/types/expenses';
 import { AuthService } from '../shared/auth/AuthService';
+import { isLocalhostEnvironment } from '../shared/utils/appMode';
+import { syncCustomCategoriesToPlanner, savePlannerExpenseLineItem } from '../shared/utils/plannerCategories';
+import { ActiveViewType } from './SidebarNavigation';
 import { RangeSlider } from './RangeSlider';
+import { NumericInput } from './NumericInput';
 import { Chart } from 'react-chartjs-2';
-import { Chart as ChartJS, registerables } from 'chart.js';
+import { Chart as ChartJS, registerables, ChartEvent, LegendItem } from 'chart.js';
+import { ImportExpensesModal } from './ImportExpensesModal';
 
 ChartJS.register(...registerables);
 
@@ -48,7 +65,8 @@ interface ActualsWorkspaceProps {
   onUpdateActuals: (actuals: Record<number, YearActualsRecord>) => void;
   onUpdateGuardrailSettings: (settings: GuardrailSettings) => void;
   onApplySpendingBonusToBudget?: (newBudget: number) => void;
-  onNavigateToTab?: (tabIndex: number) => void;
+  onNavigateToTab?: (tab: number | ActiveViewType) => void;
+  onUpdatePriorTaxReturnMAGI?: (priorMAGI: Record<number, number | null>) => void;
 }
 
 export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
@@ -57,6 +75,8 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   onUpdateActuals,
   onUpdateGuardrailSettings,
   onApplySpendingBonusToBudget,
+  onNavigateToTab,
+  onUpdatePriorTaxReturnMAGI,
 }) => {
   const simStartYear = getSimulationStartYear(inputs);
   const currentCalendarYear = new Date().getFullYear();
@@ -89,18 +109,111 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
   // Live Logged Actual Expenses from Storage Adapter
   const [loggedExpenses, setLoggedExpenses] = useState<ActualExpense[]>([]);
+  const [allYearLoggedExpenses, setAllYearLoggedExpenses] = useState<ActualExpense[]>([]);
   const [isLoadingExpenses, setIsLoadingExpenses] = useState<boolean>(false);
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<number | null>(null);
-  const [showExpenseTable, setShowExpenseTable] = useState<boolean>(true);
+  const [expensesDisplayMode, setExpensesDisplayMode] = useState<'table' | 'chart' | 'none'>('table');
+  const [chartAggregationMode, setChartAggregationMode] = useState<'monthly' | 'cumulative'>('monthly');
+  const [tableFilterText, setTableFilterText] = useState<string>('');
   const [showTransactionsDrawer, setShowTransactionsDrawer] = useState<boolean>(false);
-  const [, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
+  const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
+  const monthlyExpensesChartRef = useRef<ChartJS<'bar' | 'line'> | null>(null);
+  const [hasHiddenExpensesDatasets, setHasHiddenExpensesDatasets] = useState(false);
+
+  useEffect(() => {
+    const unsub = AuthService.subscribe((s) => {
+      setIsAuthenticated(Boolean(s));
+    });
+    return () => unsub();
+  }, []);
+
+  const storageSyncMessage = useMemo(() => {
+    if (isLocalhostEnvironment()) {
+      return 'Edits and deletions update your local browser storage.';
+    }
+    if (isAuthenticated) {
+      return 'Edits and deletions synchronize automatically to your household cloud storage.';
+    }
+    return 'Edits and deletions update your household expense ledger.';
+  }, [isAuthenticated]);
+
+  const handleUpdateActualsLivingExpenses = useCallback((year: number, amount: number) => {
+    const currentRecord = actualTracking[year] || {
+      year,
+      totalLivingExpenses: amount,
+    };
+    onUpdateActuals({
+      ...actualTracking,
+      [year]: {
+        ...currentRecord,
+        totalLivingExpenses: amount,
+      },
+    });
+  }, [actualTracking, onUpdateActuals]);
+
+  // Line item breakdown modal state
+  const [selectedLineItemForBreakdown, setSelectedLineItemForBreakdown] = useState<{
+    id: string;
+    name: string;
+    group: string;
+    plannedAnnual: number;
+    actualAnnual: number;
+  } | null>(null);
+
+  // Breakdown modal filter and sort state
+  const [breakdownFilterText, setBreakdownFilterText] = useState<string>('');
+  const [breakdownPayerFilter, setBreakdownPayerFilter] = useState<string>('ALL');
+  const [breakdownSortField, setBreakdownSortField] = useState<'date' | 'amount' | 'enteredBy'>('date');
+  const [breakdownSortDirection, setBreakdownSortDirection] = useState<'asc' | 'desc'>('desc');
+
+  // Breakdown modal editing state
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [editExpenseDate, setEditExpenseDate] = useState<string>('');
+  const [editExpenseAmount, setEditExpenseAmount] = useState<string>('');
+  const [editExpensePayer, setEditExpensePayer] = useState<string>('');
+  const [editExpenseNotes, setEditExpenseNotes] = useState<string>('');
+  const [isSavingExpenseEdit, setIsSavingExpenseEdit] = useState<boolean>(false);
+  const [expenseEditError, setExpenseEditError] = useState<string | null>(null);
 
   const loadLoggedExpenses = useCallback(async () => {
     setIsLoadingExpenses(true);
     try {
       const adapter = getStorageAdapter();
-      const exps = await adapter.getExpenses(selectedYear, selectedMonthFilter || undefined);
-      setLoggedExpenses(exps);
+      const [allExps, cats] = await Promise.all([
+        adapter.getExpenses(selectedYear),
+        adapter.getCategories().catch(() => []),
+      ]);
+      setAllYearLoggedExpenses(allExps);
+      const filtered = selectedMonthFilter
+        ? allExps.filter((exp) => {
+            if (!exp.date) return false;
+            const m = parseInt(exp.date.split('-')[1], 10);
+            return m === selectedMonthFilter;
+          })
+        : allExps;
+      setLoggedExpenses(filtered);
+
+      // 1. Sync custom categories from storage into Planner Detailed Expenses
+      if (cats && cats.length > 0) {
+        syncCustomCategoriesToPlanner(cats);
+      }
+
+      // 2. Also register any line items from logged transactions if missing from catalog
+      for (const exp of allExps) {
+        if (!exp.categoryName) continue;
+        const parts = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ') : ['Living', exp.categoryName];
+        const group = parts[0].trim();
+        const name = parts[1] ? parts[1].trim() : exp.categoryName.trim();
+        if (group === 'Healthcare') continue;
+
+        savePlannerExpenseLineItem({
+          id: exp.categoryId,
+          name,
+          groupCategory: group,
+          plannedMonthlyDefault: 0,
+        });
+      }
     } catch (err) {
       console.error('Failed to load logged actual expenses:', err);
     } finally {
@@ -165,6 +278,225 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     return { totalSpend, byCategory, byLineItem, byPayer, count: loggedExpenses.length };
   }, [loggedExpenses]);
 
+
+  // Delete an individual logged expense transaction
+  const handleDeleteLoggedExpense = async (id: string) => {
+    if (window.confirm('Delete this expense transaction?')) {
+      const adapter = getStorageAdapter();
+      await adapter.deleteExpense(id);
+      if (editingExpenseId === id) {
+        setEditingExpenseId(null);
+      }
+      await loadLoggedExpenses();
+    }
+  };
+
+  // Active line item expenses matching the selected category/line item
+  const activeLineItemExpenses = useMemo(() => {
+    if (!selectedLineItemForBreakdown) return [];
+    const targetId = selectedLineItemForBreakdown.id;
+    const targetNameLower = selectedLineItemForBreakdown.name.toLowerCase();
+
+    return loggedExpenses.filter(e => {
+      if (e.categoryId === targetId) return true;
+      const catLower = e.categoryName.toLowerCase();
+      if (catLower === targetNameLower) return true;
+      if (catLower.endsWith(` - ${targetNameLower}`)) return true;
+      if (catLower.endsWith(targetNameLower)) return true;
+      return false;
+    });
+  }, [selectedLineItemForBreakdown, loggedExpenses]);
+
+  // Unique payers for the active line item breakdown
+  const availableBreakdownPayers = useMemo(() => {
+    const payersSet = new Set<string>();
+    for (const exp of activeLineItemExpenses) {
+      payersSet.add(exp.enteredBy || 'Primary');
+    }
+    return Array.from(payersSet);
+  }, [activeLineItemExpenses]);
+
+  // Filtered and sorted expenses for the breakdown modal
+  const filteredAndSortedLineItemExpenses = useMemo(() => {
+    let list = [...activeLineItemExpenses];
+
+    // 1. Text filter (notes, amount, date, who entered)
+    if (breakdownFilterText.trim()) {
+      const q = breakdownFilterText.trim().toLowerCase();
+      list = list.filter(e => {
+        const matchesDate = e.date.toLowerCase().includes(q);
+        const matchesAmount = e.amount.toString().includes(q) || formatCurrency(e.amount).toLowerCase().includes(q);
+        const matchesPayer = (e.enteredBy || '').toLowerCase().includes(q);
+        const matchesNotes = (e.notes || '').toLowerCase().includes(q);
+        return matchesDate || matchesAmount || matchesPayer || matchesNotes;
+      });
+    }
+
+    // 2. Payer filter
+    if (breakdownPayerFilter !== 'ALL') {
+      list = list.filter(e => (e.enteredBy || 'Primary') === breakdownPayerFilter);
+    }
+
+    // 3. Sorting
+    list.sort((a, b) => {
+      let comparison = 0;
+      if (breakdownSortField === 'date') {
+        comparison = a.date.localeCompare(b.date);
+      } else if (breakdownSortField === 'amount') {
+        comparison = a.amount - b.amount;
+      } else if (breakdownSortField === 'enteredBy') {
+        const pA = a.enteredBy || 'Primary';
+        const pB = b.enteredBy || 'Primary';
+        comparison = pA.localeCompare(pB);
+      }
+      return breakdownSortDirection === 'asc' ? comparison : -comparison;
+    });
+
+    return list;
+  }, [activeLineItemExpenses, breakdownFilterText, breakdownPayerFilter, breakdownSortField, breakdownSortDirection]);
+
+  const handleToggleSort = (field: 'date' | 'amount' | 'enteredBy') => {
+    if (breakdownSortField === field) {
+      setBreakdownSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setBreakdownSortField(field);
+      setBreakdownSortDirection(field === 'date' ? 'desc' : 'asc');
+    }
+  };
+
+  const handleStartEditExpense = (exp: ActualExpense) => {
+    setEditingExpenseId(exp.expenseId);
+    setEditExpenseDate(exp.date);
+    setEditExpenseAmount(exp.amount.toFixed(2));
+    setEditExpensePayer(exp.enteredBy || 'Primary');
+    setEditExpenseNotes(exp.notes || '');
+    setExpenseEditError(null);
+  };
+
+  const handleSaveExpenseEdit = async (expenseId: string) => {
+    const parsedAmount = parseFloat(editExpenseAmount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      setExpenseEditError('Amount must be greater than $0.00');
+      return;
+    }
+    if (!editExpenseDate) {
+      setExpenseEditError('Date is required');
+      return;
+    }
+
+    setIsSavingExpenseEdit(true);
+    setExpenseEditError(null);
+
+    try {
+      const adapter = getStorageAdapter();
+      await adapter.updateExpense(expenseId, {
+        date: editExpenseDate,
+        amount: Math.round(parsedAmount * 100) / 100,
+        enteredBy: editExpensePayer.trim() || 'Primary',
+        notes: editExpenseNotes.trim() || undefined,
+      });
+
+      await loadLoggedExpenses();
+      setEditingExpenseId(null);
+    } catch (err: unknown) {
+      console.error('Failed to update expense:', err);
+      setExpenseEditError(err instanceof Error ? err.message : 'Failed to update expense');
+    } finally {
+      setIsSavingExpenseEdit(false);
+    }
+  };
+
+  // Active year record or defaults
+  const activeRecord: YearActualsRecord = useMemo(() => {
+    return actualTracking[selectedYear] || {
+      year: selectedYear,
+      equityReturnRate: null,
+      fixedIncomeReturnRate: null,
+      cpiInflationRate: null,
+      healthcareInflationRate: null,
+      totalLivingExpenses: null,
+      categoryExpenses: {},
+      healthcareOOP: null,
+      irmaaSurcharges: null,
+      preMedicareHealthcareCost: null,
+      medicareBasePremiums: null,
+      earnedSalaryYou: null,
+      earnedSalaryWife: null,
+      charitableTithe: null,
+      magi: null,
+      totalIncomeTax: null,
+      endYourPreTaxIRA: null,
+      endYourRothIRA: null,
+      endYourTaxableBrokerage: null,
+      endYourTaxableBasis: null,
+      endYourCash: null,
+      endWifePreTaxIRA: null,
+      endWifeRothIRA: null,
+      endWifeTaxableBrokerage: null,
+      endWifeTaxableBasis: null,
+      endWifeCash: null,
+    };
+  }, [actualTracking, selectedYear]);
+
+  // Active ledger row for selected year
+  const activeLedgerRow = useMemo(() => {
+    return ledger.find((r) => r.year === selectedYear);
+  }, [ledger, selectedYear]);
+
+  // Sync actual logged expenses into activeRecord living expenses and healthcare
+  const handleSyncActualsToRecord = () => {
+    const nextCategories: Record<string, number> = {};
+    let nonHealthcareSpend = 0;
+    let loggedOOP = 0;
+    let loggedPremiums = 0;
+    let loggedIRMAA = 0;
+
+    for (const exp of loggedExpenses) {
+      const catLower = exp.categoryName.toLowerCase();
+      const idLower = exp.categoryId.toLowerCase();
+      if (
+        idLower === 'healthcare-oop' ||
+        catLower.includes('out-of-pocket') ||
+        catLower.includes('deductible') ||
+        catLower.includes('copay') ||
+        catLower.includes('co-pay')
+      ) {
+        loggedOOP += exp.amount;
+      } else if (
+        idLower === 'healthcare-premiums' ||
+        catLower.includes('insurance premium') ||
+        catLower.includes('medicare part b') ||
+        catLower.includes('supplement')
+      ) {
+        loggedPremiums += exp.amount;
+      } else if (
+        idLower === 'healthcare-irmaa' ||
+        catLower.includes('irmaa') ||
+        catLower.includes('surcharge')
+      ) {
+        loggedIRMAA += exp.amount;
+      } else {
+        const group = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName;
+        nextCategories[group] = (nextCategories[group] || 0) + exp.amount;
+        nonHealthcareSpend += exp.amount;
+      }
+    }
+
+    const updatedRecord: YearActualsRecord = {
+      ...activeRecord,
+      totalLivingExpenses: Math.round(nonHealthcareSpend),
+      categoryExpenses: nextCategories,
+      healthcareOOP: loggedOOP > 0 ? Math.round(loggedOOP) : activeRecord.healthcareOOP,
+      preMedicareHealthcareCost: loggedPremiums > 0 ? Math.round(loggedPremiums) : activeRecord.preMedicareHealthcareCost,
+      irmaaSurcharges: loggedIRMAA > 0 ? Math.round(loggedIRMAA) : activeRecord.irmaaSurcharges,
+    };
+
+    onUpdateActuals({
+      ...actualTracking,
+      [selectedYear]: updatedRecord,
+    });
+  };
+
   // Comparison list between Planned Detailed Budget and Logged Actuals
   const comparisonItems = useMemo(() => {
     const items: Array<{
@@ -179,6 +511,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       payers: Record<string, number>;
     }> = [];
 
+    // 1. Detailed Living Expenses (or fallback to general living expenses if detailed expenses disabled)
     if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
       const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
       const activeStateForYear = (inputs.jurisdiction.relocationYear !== null && selectedYear >= inputs.jurisdiction.relocationYear)
@@ -222,9 +555,98 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           payers: actualEntry?.payers || {},
         });
       }
+    } else {
+      const plannedLiving = activeLedgerRow?.plannedBaseLivingExpenses ?? (inputs.annualLivingExpenses ?? 100000);
+      const plannedAmount = selectedMonthFilter ? plannedLiving / 12 : plannedLiving;
+      const actualAmount = activeRecord.totalLivingExpenses ?? actualsSummary.totalSpend ?? 0;
+      const variance = plannedAmount - actualAmount;
+      const percentUsed = plannedAmount > 0 ? (actualAmount / plannedAmount) * 100 : actualAmount > 0 ? 999 : 0;
+      items.push({
+        id: 'general-living',
+        name: 'General Living Expenses',
+        group: 'Living',
+        plannedAnnual: plannedAmount,
+        actualAnnual: actualAmount,
+        variance,
+        percentUsed,
+        transactionCount: actualsSummary.count,
+        payers: actualsSummary.byPayer,
+      });
     }
 
-    // Also include any logged categories created on the fly not present in detailedExpenses
+    // 2. Healthcare Insurance Premiums (Pre-65 + Medicare Base)
+    const plannedPremiumsAnnual = (activeLedgerRow?.preMedicareHealthcareCost ?? 0) + (activeLedgerRow?.medicareBasePremiums ?? 0);
+    const plannedPremiums = selectedMonthFilter ? plannedPremiumsAnnual / 12 : plannedPremiumsAnnual;
+    const premiumsLoggedEntry = actualsSummary.byLineItem['healthcare-premiums'];
+    const actualPremiums = premiumsLoggedEntry
+      ? premiumsLoggedEntry.total
+      : ((activeRecord.preMedicareHealthcareCost ?? 0) + (activeRecord.medicareBasePremiums ?? 0));
+
+    if (plannedPremiums > 0 || actualPremiums > 0) {
+      const variance = plannedPremiums - actualPremiums;
+      const percentUsed = plannedPremiums > 0 ? (actualPremiums / plannedPremiums) * 100 : actualPremiums > 0 ? 999 : 0;
+      items.push({
+        id: 'healthcare-premiums',
+        name: 'Healthcare Insurance Premiums (Pre-65 & Medicare Part B / Supp / D)',
+        group: 'Healthcare',
+        plannedAnnual: plannedPremiums,
+        actualAnnual: actualPremiums,
+        variance,
+        percentUsed,
+        transactionCount: premiumsLoggedEntry?.count ?? (actualPremiums > 0 ? 1 : 0),
+        payers: premiumsLoggedEntry?.payers ?? {},
+      });
+    }
+
+    // 3. Healthcare Out-of-Pocket (Max Allowance Ceiling vs Realized Co-pays & Deductibles)
+    const plannedOOPAnnual = activeLedgerRow?.plannedHealthcareOOP ?? 0;
+    const plannedOOP = selectedMonthFilter ? plannedOOPAnnual / 12 : plannedOOPAnnual;
+    const oopLoggedEntry = actualsSummary.byLineItem['healthcare-oop'];
+    const actualOOP = oopLoggedEntry
+      ? oopLoggedEntry.total
+      : (activeRecord.healthcareOOP ?? 0);
+
+    if (plannedOOP > 0 || actualOOP > 0) {
+      const variance = plannedOOP - actualOOP;
+      const percentUsed = plannedOOP > 0 ? (actualOOP / plannedOOP) * 100 : actualOOP > 0 ? 999 : 0;
+      items.push({
+        id: 'healthcare-oop',
+        name: 'Healthcare Out-of-Pocket (Max Allowance Ceiling)',
+        group: 'Healthcare',
+        plannedAnnual: plannedOOP,
+        actualAnnual: actualOOP,
+        variance,
+        percentUsed,
+        transactionCount: oopLoggedEntry?.count ?? (actualOOP > 0 ? 1 : 0),
+        payers: oopLoggedEntry?.payers ?? {},
+      });
+    }
+
+    // 4. Medicare IRMAA Surcharges (Part B & D)
+    const plannedIRMAAAnnual = activeLedgerRow?.combinedSurchargeAnnual ?? 0;
+    const plannedIRMAA = selectedMonthFilter ? plannedIRMAAAnnual / 12 : plannedIRMAAAnnual;
+    const irmaaLoggedEntry = actualsSummary.byLineItem['healthcare-irmaa'];
+    const actualIRMAA = irmaaLoggedEntry
+      ? irmaaLoggedEntry.total
+      : (activeRecord.irmaaSurcharges ?? 0);
+
+    if (plannedIRMAA > 0 || actualIRMAA > 0) {
+      const variance = plannedIRMAA - actualIRMAA;
+      const percentUsed = plannedIRMAA > 0 ? (actualIRMAA / plannedIRMAA) * 100 : actualIRMAA > 0 ? 999 : 0;
+      items.push({
+        id: 'healthcare-irmaa',
+        name: 'Medicare IRMAA Surcharges (Part B & D)',
+        group: 'Healthcare',
+        plannedAnnual: plannedIRMAA,
+        actualAnnual: actualIRMAA,
+        variance,
+        percentUsed,
+        transactionCount: irmaaLoggedEntry?.count ?? (actualIRMAA > 0 ? 1 : 0),
+        payers: irmaaLoggedEntry?.payers ?? {},
+      });
+    }
+
+    // 5. Also include any logged categories created on the fly not present in items
     for (const [catId, entry] of Object.entries(actualsSummary.byLineItem)) {
       if (!items.some((i) => i.id === catId)) {
         const parts = entry.name.includes(' - ') ? entry.name.split(' - ') : ['Custom', entry.name];
@@ -243,71 +665,29 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     }
 
     return items.sort((a, b) => b.actualAnnual - a.actualAnnual);
-  }, [inputs.useDetailedExpenses, inputs.detailedExpenses, inputs.jurisdiction.currentState, inputs.jurisdiction.targetState, inputs.jurisdiction.relocationYear, selectedYear, selectedMonthFilter, actualsSummary]);
+  }, [
+    inputs.useDetailedExpenses,
+    inputs.detailedExpenses,
+    inputs.annualLivingExpenses,
+    inputs.jurisdiction.currentState,
+    inputs.jurisdiction.targetState,
+    inputs.jurisdiction.relocationYear,
+    selectedYear,
+    selectedMonthFilter,
+    actualsSummary,
+    activeLedgerRow,
+    activeRecord,
+  ]);
 
-  // Sync actual logged expenses into activeRecord living expenses
-  const handleSyncActualsToRecord = () => {
-    const nextCategories: Record<string, number> = {};
-    for (const [catName, amount] of Object.entries(actualsSummary.byCategory)) {
-      const group = catName.includes(' - ') ? catName.split(' - ')[0].trim() : catName;
-      nextCategories[group] = (nextCategories[group] || 0) + amount;
-    }
+  const totalPlannedForComparison = useMemo(() => {
+    return comparisonItems.reduce((acc, i) => acc + i.plannedAnnual, 0);
+  }, [comparisonItems]);
 
-    const updatedRecord = {
-      ...activeRecord,
-      totalLivingExpenses: Math.round(actualsSummary.totalSpend),
-      categoryExpenses: nextCategories,
-    };
+  const totalActualForComparison = useMemo(() => {
+    return comparisonItems.reduce((acc, i) => acc + i.actualAnnual, 0);
+  }, [comparisonItems]);
 
-    onUpdateActuals({
-      ...actualTracking,
-      [selectedYear]: updatedRecord,
-    });
-  };
-
-  // Delete an individual logged expense transaction
-  const handleDeleteLoggedExpense = async (id: string) => {
-    if (window.confirm('Delete this expense transaction?')) {
-      const adapter = getStorageAdapter();
-      await adapter.deleteExpense(id);
-      await loadLoggedExpenses();
-    }
-  };
-
-  // Active year record or defaults
-  const activeRecord: YearActualsRecord = useMemo(() => {
-    return actualTracking[selectedYear] || {
-      year: selectedYear,
-      equityReturnRate: null,
-      fixedIncomeReturnRate: null,
-      cpiInflationRate: null,
-      healthcareInflationRate: null,
-      totalLivingExpenses: null,
-      categoryExpenses: {},
-      preMedicareHealthcareCost: null,
-      medicareBasePremiums: null,
-      earnedSalaryYou: null,
-      earnedSalaryWife: null,
-      charitableTithe: null,
-      magi: null,
-      totalIncomeTax: null,
-      endYourPreTaxIRA: null,
-      endYourRothIRA: null,
-      endYourTaxableBrokerage: null,
-      endYourTaxableBasis: null,
-      endYourCash: null,
-      endWifePreTaxIRA: null,
-      endWifeRothIRA: null,
-      endWifeTaxableBrokerage: null,
-      endWifeTaxableBasis: null,
-      endWifeCash: null,
-    };
-  }, [actualTracking, selectedYear]);
-
-  // Active ledger row for selected year
-  const activeLedgerRow = useMemo(() => {
-    return ledger.find((r) => r.year === selectedYear);
-  }, [ledger, selectedYear]);
+  const totalVarianceForComparison = totalPlannedForComparison - totalActualForComparison;
 
   // Format currency helper
   const formatCurrency = (val: number | null | undefined) => {
@@ -318,6 +698,353 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       maximumFractionDigits: 0,
     }).format(val);
   };
+
+  // Dynamic regex / substring filter across all columns for the variance comparison table
+  const filteredComparisonItems = useMemo(() => {
+    if (!tableFilterText.trim()) return comparisonItems;
+
+    const rawQuery = tableFilterText.trim();
+    let regex: RegExp | null = null;
+    try {
+      regex = new RegExp(rawQuery, 'i');
+    } catch {
+      regex = null;
+    }
+    const lowerQuery = rawQuery.toLowerCase();
+
+    return comparisonItems.filter((item) => {
+      const payerStrings = Object.entries(item.payers || {})
+        .map(([payer, amt]) => `${payer} ${amt} ${formatCurrency(amt)}`)
+        .join(' ');
+
+      const concatenatedFields = [
+        item.name,
+        item.group,
+        item.id,
+        item.plannedAnnual.toString(),
+        formatCurrency(item.plannedAnnual),
+        Math.round(item.plannedAnnual).toString(),
+        item.actualAnnual.toString(),
+        formatCurrency(item.actualAnnual),
+        Math.round(item.actualAnnual).toString(),
+        item.variance.toString(),
+        formatCurrency(item.variance),
+        Math.round(item.variance).toString(),
+        `${Math.round(item.percentUsed)}%`,
+        `${item.transactionCount} logs`,
+        item.transactionCount.toString(),
+        payerStrings,
+      ].join(' ');
+
+      if (regex) {
+        return regex.test(concatenatedFields);
+      }
+      return concatenatedFields.toLowerCase().includes(lowerQuery);
+    });
+  }, [comparisonItems, tableFilterText]);
+
+
+  // Scheduled 12-month budget array accounting for periodic due months (e.g. Sep/Dec property taxes)
+  const scheduledMonthlyBudgets = useMemo(() => {
+    const monthlyBudgets = Array(12).fill(0);
+
+    if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
+      const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
+      const activeStateForYear = (inputs.jurisdiction.relocationYear !== null && selectedYear >= inputs.jurisdiction.relocationYear)
+        ? inputs.jurisdiction.targetState
+        : inputs.jurisdiction.currentState;
+      const stateCosts = norm.costs[activeStateForYear] || norm.costs.ALL || norm.costs[inputs.jurisdiction.currentState] || {};
+      const freqs = norm.frequencies;
+
+      for (const item of norm.catalog.items) {
+        if (item.isOneTime && item.targetYear !== selectedYear) continue;
+
+        const appliesToActiveState = !item.applicableStates ||
+          item.applicableStates.includes('ALL') ||
+          item.applicableStates.includes(activeStateForYear);
+        if (!appliesToActiveState) continue;
+
+        const cost = stateCosts[item.id] ?? 0;
+        const freq = freqs[item.id] ?? item.defaultFrequency ?? (item.isOneTime ? 1 : 12);
+
+        if (freq === 12 && !item.isOneTime) {
+          // Monthly item: add to all 12 months
+          for (let m = 0; m < 12; m++) {
+            monthlyBudgets[m] += cost;
+          }
+        } else if (item.dueMonths && item.dueMonths.length > 0) {
+          // Item has explicitly scheduled due month(s)
+          item.dueMonths.forEach((mNum) => {
+            if (mNum >= 1 && mNum <= 12) {
+              monthlyBudgets[mNum - 1] += cost;
+            }
+          });
+        } else {
+          // Non-monthly without explicit due months: spread evenly (sinking fund accrual)
+          const annualTotal = item.isOneTime ? cost : cost * freq;
+          const monthlyPortion = annualTotal / 12;
+          for (let m = 0; m < 12; m++) {
+            monthlyBudgets[m] += monthlyPortion;
+          }
+        }
+      }
+    } else {
+      const plannedLiving = activeLedgerRow?.plannedBaseLivingExpenses ?? (inputs.annualLivingExpenses ?? 100000);
+      const monthlyPortion = plannedLiving / 12;
+      for (let m = 0; m < 12; m++) {
+        monthlyBudgets[m] += monthlyPortion;
+      }
+    }
+
+    // Healthcare Obligations spread evenly across all 12 months
+    const healthcareMonthly = ((activeLedgerRow?.preMedicareHealthcareCost ?? 0) +
+      (activeLedgerRow?.medicareBasePremiums ?? 0) +
+      (activeLedgerRow?.plannedHealthcareOOP ?? 0) +
+      (activeLedgerRow?.combinedSurchargeAnnual ?? 0)) / 12;
+
+    for (let m = 0; m < 12; m++) {
+      monthlyBudgets[m] += healthcareMonthly;
+    }
+
+    return monthlyBudgets;
+  }, [
+    inputs.useDetailedExpenses,
+    inputs.detailedExpenses,
+    inputs.annualLivingExpenses,
+    inputs.jurisdiction.currentState,
+    inputs.jurisdiction.targetState,
+    inputs.jurisdiction.relocationYear,
+    selectedYear,
+    activeLedgerRow,
+  ]);
+
+  // Monthly / Cumulative Stacked Category Spend Chart Data
+  const monthlyExpensesChartData = useMemo(() => {
+    const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    const CATEGORY_COLORS: Record<string, { bg: string; border: string }> = {
+      'Living': { bg: 'rgba(56, 189, 248, 0.85)', border: '#38bdf8' },
+      'Home': { bg: 'rgba(99, 102, 241, 0.85)', border: '#6366f1' },
+      'Utilities': { bg: 'rgba(234, 179, 8, 0.85)', border: '#eab308' },
+      'Transportation': { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
+      'Auto': { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
+      'Leisure': { bg: 'rgba(236, 72, 153, 0.85)', border: '#ec4899' },
+      'Healthcare': { bg: 'rgba(20, 184, 166, 0.85)', border: '#14b8a6' },
+      'Insurance': { bg: 'rgba(14, 165, 233, 0.85)', border: '#0ea5e9' },
+      'Charity': { bg: 'rgba(249, 115, 22, 0.85)', border: '#f97316' },
+      'Taxes': { bg: 'rgba(244, 63, 94, 0.85)', border: '#f43f5e' },
+      'One-Time Expenses': { bg: 'rgba(245, 158, 11, 0.85)', border: '#f59e0b' },
+      'Custom': { bg: 'rgba(148, 163, 184, 0.85)', border: '#94a3b8' },
+    };
+
+    const FALLBACK_PALETTE = [
+      { bg: 'rgba(56, 189, 248, 0.85)', border: '#38bdf8' },
+      { bg: 'rgba(99, 102, 241, 0.85)', border: '#6366f1' },
+      { bg: 'rgba(236, 72, 153, 0.85)', border: '#ec4899' },
+      { bg: 'rgba(234, 179, 8, 0.85)', border: '#eab308' },
+      { bg: 'rgba(20, 184, 166, 0.85)', border: '#14b8a6' },
+      { bg: 'rgba(249, 115, 22, 0.85)', border: '#f97316' },
+      { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
+      { bg: 'rgba(244, 63, 94, 0.85)', border: '#f43f5e' },
+    ];
+
+    const groupsSet = new Set<string>();
+    if (inputs.detailedExpenses?.catalog?.categories) {
+      inputs.detailedExpenses.catalog.categories.forEach((c) => groupsSet.add(c));
+    }
+
+    const groupMonthlySpends: Record<string, number[]> = {};
+    const initGroup = (g: string) => {
+      if (!groupMonthlySpends[g]) {
+        groupMonthlySpends[g] = Array(12).fill(0);
+      }
+    };
+
+    groupsSet.forEach((g) => initGroup(g));
+
+    allYearLoggedExpenses.forEach((exp) => {
+      if (!exp.date) return;
+      const m = parseInt(exp.date.split('-')[1], 10);
+      if (m >= 1 && m <= 12) {
+        let group = 'Living';
+        if (exp.categoryName) {
+          group = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName.trim();
+        }
+        groupsSet.add(group);
+        initGroup(group);
+        groupMonthlySpends[group][m - 1] += (exp.amount || 0);
+      }
+    });
+
+    const activeGroups = Array.from(groupsSet).filter((g) => {
+      const total = (groupMonthlySpends[g] || []).reduce((a, b) => a + b, 0);
+      return total > 0;
+    });
+
+    const isCumulative = chartAggregationMode === 'cumulative';
+
+    // Build budget line data
+    let budgetLineData: number[];
+    if (isCumulative) {
+      let runningSum = 0;
+      budgetLineData = scheduledMonthlyBudgets.map((b) => {
+        runningSum += b;
+        return runningSum;
+      });
+    } else {
+      budgetLineData = scheduledMonthlyBudgets;
+    }
+
+    const barDatasets = activeGroups.map((group, idx) => {
+      const colors = CATEGORY_COLORS[group] || FALLBACK_PALETTE[idx % FALLBACK_PALETTE.length];
+      let data = groupMonthlySpends[group];
+      if (isCumulative) {
+        let runningSpend = 0;
+        data = data.map((s) => {
+          runningSpend += s;
+          return runningSpend;
+        });
+      }
+
+      return {
+        type: 'bar' as const,
+        label: group,
+        data,
+        backgroundColor: colors.bg,
+        borderColor: colors.border,
+        borderWidth: 1,
+        stack: 'expensesStack',
+        borderRadius: 3,
+        order: 2,
+      };
+    });
+
+    const budgetLineDataset = {
+      type: 'line' as const,
+      label: isCumulative ? 'Cumulative Planned Budget (YTD)' : 'Scheduled Monthly Budget',
+      data: budgetLineData,
+      borderColor: '#10b981',
+      backgroundColor: 'transparent',
+      borderWidth: 2.5,
+      borderDash: [6, 4],
+      pointRadius: 3,
+      pointHoverRadius: 6,
+      pointBackgroundColor: '#10b981',
+      pointBorderColor: '#0f172a',
+      order: 1,
+    };
+
+    return {
+      labels: MONTH_LABELS,
+      datasets: [budgetLineDataset, ...barDatasets],
+    };
+  }, [allYearLoggedExpenses, inputs.detailedExpenses, scheduledMonthlyBudgets, chartAggregationMode]);
+
+  const monthlyExpensesChartOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: {
+      mode: 'index' as const,
+      intersect: false,
+    },
+    plugins: {
+      legend: {
+        position: 'top' as const,
+        onClick: (e: ChartEvent, legendItem: LegendItem, legend: { chart: ChartJS }) => {
+          const index = legendItem.datasetIndex;
+          if (index === undefined) return;
+          const ci = legend.chart;
+          const nativeEvent = e.native as MouseEvent | undefined;
+          const hasModifier = nativeEvent ? (nativeEvent.ctrlKey || nativeEvent.altKey || nativeEvent.shiftKey || nativeEvent.metaKey) : false;
+
+          if (hasModifier) {
+            // Modifier + Click: Solo / Isolate (or reset if already soloed)
+            let visibleCount = 0;
+            let isClickedVisible = false;
+            ci.data.datasets.forEach((_, i: number) => {
+              if (ci.isDatasetVisible(i)) {
+                visibleCount++;
+                if (i === index) {
+                  isClickedVisible = true;
+                }
+              }
+            });
+
+            if (visibleCount === 1 && isClickedVisible) {
+              // Already soloed: Show all
+              ci.data.datasets.forEach((_, i: number) => {
+                ci.setDatasetVisibility(i, true);
+              });
+            } else {
+              // Solo this dataset
+              ci.data.datasets.forEach((_, i: number) => {
+                ci.setDatasetVisibility(i, i === index);
+              });
+            }
+          } else {
+            // Standard Click: Toggle individually
+            const isVisible = ci.isDatasetVisible(index);
+            ci.setDatasetVisibility(index, !isVisible);
+          }
+
+          ci.update();
+
+          // Update hasHiddenExpensesDatasets state to conditionally render Show All Categories UI
+          let anyHidden = false;
+          ci.data.datasets.forEach((_, i: number) => {
+            if (!ci.isDatasetVisible(i)) {
+              anyHidden = true;
+            }
+          });
+          setHasHiddenExpensesDatasets(anyHidden);
+        },
+        labels: {
+          color: '#cbd5e1',
+          boxWidth: 15,
+          padding: 12,
+          usePointStyle: true,
+          font: { size: 11, weight: 500 },
+        },
+      },
+      tooltip: {
+        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+        titleColor: '#f8fafc',
+        bodyColor: '#cbd5e1',
+        borderColor: '#334155',
+        borderWidth: 1,
+        padding: 10,
+        callbacks: {
+          label: (context: { dataset: { label?: string; type?: string }; raw: unknown }) => {
+            const val = Number(context.raw) || 0;
+            if (val === 0 && context.dataset.type === 'bar') return '';
+            return ` ${context.dataset.label || 'Spend'}: ${formatCurrency(val)}`;
+          },
+          footer: (items: Array<{ dataset: { type?: string }; raw: unknown }>) => {
+            const totalActual = items
+              .filter((i) => i.dataset.type === 'bar')
+              .reduce((sum: number, i) => sum + (Number(i.raw) || 0), 0);
+            return totalActual > 0 ? `Total Actual: ${formatCurrency(totalActual)}` : '';
+          },
+        },
+      },
+    },
+    scales: {
+      x: {
+        stacked: true,
+        ticks: { color: '#94a3b8', font: { size: 11 } },
+        grid: { color: 'rgba(51, 65, 85, 0.25)' },
+      },
+      y: {
+        stacked: true,
+        ticks: {
+          color: '#94a3b8',
+          font: { size: 11 },
+          callback: (val: string | number) => formatCurrency(Number(val)),
+        },
+        grid: { color: 'rgba(51, 65, 85, 0.25)' },
+      },
+    },
+  }), []);
 
   // Update field in active record
   const handleFieldChange = <K extends keyof YearActualsRecord>(field: K, value: YearActualsRecord[K]) => {
@@ -351,6 +1078,38 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     onUpdateActuals(nextActuals);
   };
 
+  // Helper to compute planned recurring budget for a given year (considering relocation)
+  const getPlannedRecurringBudgetForYear = useCallback((year: number) => {
+    if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
+      const activeState = (inputs.jurisdiction.relocationYear !== null && year >= inputs.jurisdiction.relocationYear)
+        ? inputs.jurisdiction.targetState
+        : inputs.jurisdiction.currentState;
+      const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
+      const stateCosts = norm.costs[activeState] || {};
+      const allCosts = norm.costs['ALL'] || {};
+      const defaultStateCosts = norm.costs[inputs.jurisdiction.currentState] || {};
+      const freqs = norm.frequencies;
+      const sum = norm.catalog.items
+        .filter((i) => !i.isOneTime)
+        .reduce((acc, item) => {
+          const applies = !item.applicableStates || item.applicableStates.includes('ALL') || item.applicableStates.includes(activeState);
+          if (!applies) return acc;
+          const cost = stateCosts[item.id] ?? allCosts[item.id] ?? defaultStateCosts[item.id] ?? 0;
+          const freq = freqs[item.id] ?? item.defaultFrequency ?? 12;
+          return acc + cost * freq;
+        }, 0);
+      if (sum > 0) return sum;
+    }
+    return inputs.annualLivingExpenses ?? 100000;
+  }, [
+    inputs.useDetailedExpenses,
+    inputs.detailedExpenses,
+    inputs.jurisdiction.relocationYear,
+    inputs.jurisdiction.targetState,
+    inputs.jurisdiction.currentState,
+    inputs.annualLivingExpenses,
+  ]);
+
   // Add a new year
   const handleAddYear = () => {
     const existingYears = Object.keys(actualTracking).map(Number);
@@ -361,7 +1120,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       fixedIncomeReturnRate: inputs.growthAssumptions.fixedIncomeReturnRate,
       cpiInflationRate: inputs.growthAssumptions.cpiInflationRate,
       healthcareInflationRate: inputs.growthAssumptions.healthcareInflationRate,
-      totalLivingExpenses: inputs.annualLivingExpenses,
+      totalLivingExpenses: getPlannedRecurringBudgetForYear(nextYear),
     };
     const nextActuals = {
       ...actualTracking,
@@ -387,37 +1146,31 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   // Latest actual row for guardrail analysis
   const latestActualRow = useMemo(() => {
     const actualRows = ledger.filter((r) => r.isActual);
-    if (actualRows.length === 0) return ledger[0];
+    if (actualRows.length === 0) return null;
     return actualRows[actualRows.length - 1];
   }, [ledger]);
 
-  // Baseline recurring budget before discretionary bonuses
+  // Baseline recurring budget for current calendar year
   const baselineRecurringAnnual = useMemo(() => {
-    if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
-      const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
-      const stateCosts = norm.costs[inputs.jurisdiction.currentState] || {};
-      const freqs = norm.frequencies;
-      const sum = norm.catalog.items
-        .filter((i) => !i.isOneTime)
-        .reduce((acc, item) => {
-          const cost = stateCosts[item.id] ?? 0;
-          const freq = freqs[item.id] ?? item.defaultFrequency ?? 12;
-          return acc + cost * freq;
-        }, 0);
-      if (sum > 0) return sum;
-    }
-    return 100000;
-  }, [inputs.useDetailedExpenses, inputs.detailedExpenses, inputs.jurisdiction.currentState]);
+    return getPlannedRecurringBudgetForYear(currentCalendarYear);
+  }, [getPlannedRecurringBudgetForYear, currentCalendarYear]);
 
   // Guardrail metrics
-  const guardrailUpperLimit = latestActualRow?.guardrailUpperLimit ?? ((inputs.annualLivingExpenses ?? 100000) * 1.15);
-  const guardrailLowerLimit = latestActualRow?.guardrailLowerLimit ?? ((inputs.annualLivingExpenses ?? 100000) * 0.85);
+  const plannedBudgetBase = getPlannedRecurringBudgetForYear(latestActualRow?.year ?? selectedYear);
+  const plannedBudget = latestActualRow?.plannedLivingExpenses ?? (plannedBudgetBase * (ledger[0]?.cpiFactor ?? 1.0) + (ledger[0]?.plannedHealthcareOOP ?? 0));
+  const guardrailUpperLimit = latestActualRow?.guardrailUpperLimit ?? (plannedBudget * (1 + (guardrailSettings.upperGuardrailPct ?? 0.15)));
+  const guardrailLowerLimit = latestActualRow?.guardrailLowerLimit ?? (plannedBudget * (1 - (guardrailSettings.lowerGuardrailPct ?? 0.15)));
   const currentSurplusGap = latestActualRow?.actualSurplusGap ?? 0;
   const permittedBonus = latestActualRow?.permittedSpendingBonus ?? 0;
-  const plannedBudget = (inputs.annualLivingExpenses ?? 100000) * (latestActualRow?.cpiFactor ?? 1.0);
-  const actualSpend = latestActualRow?.livingExpenses ?? plannedBudget;
+
+  // Actual spend: if an actual row exists in ledger, use its realized living expenses.
+  // Otherwise, use what's tracked or logged for selectedYear (defaults to 0 when zero transactions logged).
+  const trackedSpend = (activeRecord?.totalLivingExpenses !== undefined && activeRecord?.totalLivingExpenses !== null)
+    ? (activeRecord.totalLivingExpenses + (activeRecord.healthcareOOP ?? 0))
+    : actualsSummary.totalSpend;
+  const actualSpend = latestActualRow ? latestActualRow.livingExpenses : trackedSpend;
   const spendingSavings = plannedBudget - actualSpend;
-  const marketSurplusShare = currentSurplusGap - spendingSavings;
+  const marketSurplusShare = latestActualRow ? (currentSurplusGap - spendingSavings) : 0;
 
   // Variance Comparison Chart Data
   const varianceChartData = useMemo(() => {
@@ -430,7 +1183,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       datasets: [
         {
           label: 'Planned Budget ($)',
-          data: rowsToChart.map((r) => (inputs.annualLivingExpenses ?? 100000) * r.cpiFactor),
+          data: rowsToChart.map((r) => r.plannedLivingExpenses ?? (getPlannedRecurringBudgetForYear(r.year) * r.cpiFactor)),
           borderColor: '#60a5fa',
           backgroundColor: 'rgba(96, 165, 250, 0.1)',
           borderWidth: 1.75,
@@ -467,7 +1220,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
         },
       ],
     };
-  }, [ledger, inputs.annualLivingExpenses]);
+  }, [ledger, getPlannedRecurringBudgetForYear]);
 
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar bg-slate-950 text-slate-100">
@@ -642,20 +1395,30 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5" />
-                Permission to Spend Advisory ({latestActualRow ? latestActualRow.year : currentCalendarYear})
+                Permission to Spend Advisory ({latestActualRow ? latestActualRow.year : selectedYear})
               </span>
               <span
                 className={`text-xs font-extrabold px-2.5 py-0.5 rounded-full border ${
-                  currentSurplusGap >= 0
+                  !latestActualRow
+                    ? 'bg-slate-800 text-slate-300 border-slate-700'
+                    : currentSurplusGap >= 0
                     ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                     : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
                 }`}
               >
-                {currentSurplusGap >= 0 ? `+${formatCurrency(currentSurplusGap)} Net Surplus` : `${formatCurrency(currentSurplusGap)} Deficit`}
+                {!latestActualRow
+                  ? 'Tracking Active'
+                  : currentSurplusGap >= 0
+                  ? `+${formatCurrency(currentSurplusGap)} Net Surplus`
+                  : `${formatCurrency(currentSurplusGap)} Deficit`}
               </span>
             </div>
             <p className="text-sm font-bold text-slate-100 mt-1">
-              {currentSurplusGap >= 0 ? (
+              {!latestActualRow ? (
+                <>
+                  Tracking for {selectedYear} is active. Log actual expense transactions and reconcile year-end portfolio balances to activate next year's spending advisory.
+                </>
+              ) : currentSurplusGap >= 0 ? (
                 <>
                   You have <span className="text-emerald-400">permission to spend up to +{formatCurrency(permittedBonus)}</span> in extra discretionary budget next year!
                 </>
@@ -825,26 +1588,38 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 )}
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Live expense records synchronized from your companion Expenser PWA and household storage.
+                Live expense records synchronized from your companion Expenser PWA and household storage. Click any line item to view, filter, sort, edit, or delete logged purchases. Manage planned baselines in the{' '}
+                {onNavigateToTab && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateToTab('params-expenses')}
+                    className="text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer inline-flex items-center gap-0.5"
+                  >
+                    Detailed Living Expenses worksheet
+                    <ArrowRight className="w-2.5 h-2.5" />
+                  </button>
+                )}
+                .
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <div className="flex items-center gap-2 self-start sm:self-auto flex-nowrap shrink-0">
             <button
-              onClick={() => loadLoggedExpenses()}
-              disabled={isLoadingExpenses}
-              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-all border border-slate-700/60 cursor-pointer"
-              title="Refresh logged expenses"
+              type="button"
+              onClick={() => setShowImportModal(true)}
+              className="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm shrink-0 whitespace-nowrap cursor-pointer"
+              title="Import and backfill expenses from CSV"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingExpenses ? 'animate-spin text-emerald-400' : ''}`} />
+              <Upload className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Import / Backfill</span>
             </button>
 
             <a
               href="/expenser"
               target="_blank"
               rel="noopener noreferrer"
-              className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+              className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm shrink-0 whitespace-nowrap"
               title="Open mobile Expenser PWA in new tab"
             >
               <Smartphone className="w-3.5 h-3.5" />
@@ -853,11 +1628,13 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
             </a>
 
             <button
-              onClick={() => setShowExpenseTable(!showExpenseTable)}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-all flex items-center gap-1 cursor-pointer"
+              onClick={() => loadLoggedExpenses()}
+              disabled={isLoadingExpenses}
+              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-all border border-slate-700/60 cursor-pointer shrink-0"
+              title="Refresh logged expenses"
+              aria-label="Refresh logged expenses"
             >
-              {showExpenseTable ? 'Collapse' : 'Expand'}
-              {showExpenseTable ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingExpenses ? 'animate-spin text-emerald-400' : ''}`} />
             </button>
           </div>
         </div>
@@ -898,38 +1675,36 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
         {/* Summary KPIs Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {/* Total Logged Actual Spend */}
+          {/* Total Actual Spend */}
           <div className="bg-slate-950/60 border border-slate-800/90 rounded-xl p-3.5">
             <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-              Total Logged Spend
+              Total Actual Spend
             </span>
             <div className="text-xl font-extrabold text-white mt-1">
-              {formatCurrency(actualsSummary.totalSpend)}
+              {formatCurrency(totalActualForComparison)}
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              {actualsSummary.count} transaction{actualsSummary.count === 1 ? '' : 's'} recorded
+              {actualsSummary.count} logged transaction{actualsSummary.count === 1 ? '' : 's'} + recorded actuals
             </p>
           </div>
 
           {/* Planned Budget */}
           <div className="bg-slate-950/60 border border-slate-800/90 rounded-xl p-3.5">
             <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-              Planned Baseline Budget
+              Planned Total Budget
             </span>
             <div className="text-xl font-extrabold text-slate-200 mt-1">
-              {formatCurrency(selectedMonthFilter ? (baselineRecurringAnnual / 12) : baselineRecurringAnnual)}
+              {formatCurrency(totalPlannedForComparison)}
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              {selectedMonthFilter ? '1 month allocation' : 'Annual budgeted recurring baseline'}
+              {selectedMonthFilter ? '1 month allocation' : 'Annual comprehensive living & healthcare budget'}
             </p>
           </div>
 
           {/* Net Variance */}
           {(() => {
-            const plannedRef = selectedMonthFilter ? (baselineRecurringAnnual / 12) : baselineRecurringAnnual;
-            const variance = plannedRef - actualsSummary.totalSpend;
-            const isUnder = variance >= 0;
-            const pct = plannedRef > 0 ? Math.abs((variance / plannedRef) * 100).toFixed(1) : '0';
+            const isUnder = totalVarianceForComparison >= 0;
+            const pct = totalPlannedForComparison > 0 ? Math.abs((totalVarianceForComparison / totalPlannedForComparison) * 100).toFixed(1) : '0';
             return (
               <div className={`border rounded-xl p-3.5 ${
                 isUnder
@@ -940,10 +1715,10 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                   {isUnder ? 'Under Budget (Surplus)' : 'Over Budget (Deficit)'}
                 </span>
                 <div className="text-xl font-extrabold mt-1 flex items-center gap-1">
-                  {isUnder ? `+${formatCurrency(variance)}` : `-${formatCurrency(Math.abs(variance))}`}
+                  {isUnder ? `+${formatCurrency(totalVarianceForComparison)}` : `-${formatCurrency(Math.abs(totalVarianceForComparison))}`}
                 </div>
                 <p className="text-[11px] opacity-80 mt-0.5">
-                  {isUnder ? `${pct}% below planned spend` : `${pct}% above planned spend`}
+                  {isUnder ? `${pct}% below planned budget` : `${pct}% above planned budget`}
                 </p>
               </div>
             );
@@ -982,8 +1757,137 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           </div>
         </div>
 
+        {/* 3-Way View Selector: Table / Graph / Hide */}
+        <div className="flex justify-center pt-2 pb-1">
+          <div className="inline-flex p-1 bg-slate-950/80 rounded-xl border border-slate-800 shadow-inner">
+            <button
+              type="button"
+              onClick={() => setExpensesDisplayMode(prev => prev === 'table' ? 'none' : 'table')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                expensesDisplayMode === 'table'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+              }`}
+            >
+              <Table className="w-3.5 h-3.5" />
+              <span>Table View</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setExpensesDisplayMode(prev => prev === 'chart' ? 'none' : 'chart')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                expensesDisplayMode === 'chart'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              <span>Graph View</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setExpensesDisplayMode(prev => prev === 'none' ? 'table' : 'none')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${
+                expensesDisplayMode === 'none'
+                  ? 'bg-slate-800 text-slate-200 font-bold border border-slate-700'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'
+              }`}
+              title="Hide table and graph"
+            >
+              <EyeOff className="w-3.5 h-3.5" />
+              <span>{expensesDisplayMode === 'none' ? 'Hidden' : 'Hide'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Graph View: Monthly / Cumulative Stacked Bar Chart with Budget Benchmark */}
+        {expensesDisplayMode === 'chart' && (
+          <div className="space-y-3 pt-1 animate-in fade-in duration-200">
+            <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <BarChart3 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      {chartAggregationMode === 'monthly'
+                        ? `Monthly Spend by Category vs. Scheduled Budget (${selectedYear})`
+                        : `Cumulative Year-to-Date (YTD) Spend vs. Budget (${selectedYear})`}
+                    </h4>
+                    <p className="text-[11px] text-slate-400">
+                      {chartAggregationMode === 'monthly'
+                        ? 'Category spending compared against true scheduled monthly budgets (including scheduled due months for property taxes & insurance).'
+                        : 'Running cumulative total of actual spend compared against cumulative planned budget progression.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+                  {hasHiddenExpensesDatasets && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (monthlyExpensesChartRef.current) {
+                          const chart = monthlyExpensesChartRef.current;
+                          chart.data.datasets.forEach((_, i: number) => {
+                            chart.setDatasetVisibility(i, true);
+                          });
+                          chart.update();
+                          setHasHiddenExpensesDatasets(false);
+                        }
+                      }}
+                      className="text-xs font-semibold px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 rounded-lg transition-all cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Show All Categories</span>
+                    </button>
+                  )}
+
+                  {/* Monthly vs Cumulative Toggle */}
+                  <div className="inline-flex p-0.5 bg-slate-900 rounded-lg border border-slate-800 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setChartAggregationMode('monthly')}
+                      className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                        chartAggregationMode === 'monthly'
+                          ? 'bg-emerald-500 text-slate-950 shadow font-bold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Monthly Cash Flow
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChartAggregationMode('cumulative')}
+                      className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                        chartAggregationMode === 'cumulative'
+                          ? 'bg-emerald-500 text-slate-950 shadow font-bold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Cumulative YTD
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="h-80 w-full pt-1">
+                <Chart
+                  ref={monthlyExpensesChartRef}
+                  type="bar"
+                  data={monthlyExpensesChartData}
+                  options={monthlyExpensesChartOptions}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Detailed Line Item Variance Table */}
-        {showExpenseTable && (
+        {expensesDisplayMode === 'table' && (
           <div className="space-y-3 pt-1">
             {comparisonItems.length === 0 ? (
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-8 text-center space-y-2.5">
@@ -1006,93 +1910,188 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="overflow-x-auto border border-slate-800 rounded-xl">
-                <table className="w-full text-left text-xs text-slate-300 divide-y divide-slate-800">
-                  <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] font-bold tracking-wider">
-                    <tr>
-                      <th className="px-3.5 py-2.5">Line Item / Category</th>
-                      <th className="px-3.5 py-2.5 text-right">Planned Budget</th>
-                      <th className="px-3.5 py-2.5 text-right">Actual Spend</th>
-                      <th className="px-3.5 py-2.5 text-right">Variance</th>
-                      <th className="px-3.5 py-2.5">Budget Usage</th>
-                      <th className="px-3.5 py-2.5">Payer Breakdown</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
-                    {comparisonItems.map((item) => {
-                      const isOver = item.variance < 0;
-                      const hasSpend = item.actualAnnual > 0;
-                      return (
-                        <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
-                          <td className="px-3.5 py-2.5 font-medium text-white flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
-                            <div>
-                              <div className="font-semibold text-slate-100">{item.name}</div>
-                              <div className="text-[10px] text-slate-500">{item.group}</div>
-                            </div>
-                          </td>
-                          <td className="px-3.5 py-2.5 text-right font-mono text-slate-300">
-                            {formatCurrency(item.plannedAnnual)}
-                          </td>
-                          <td className="px-3.5 py-2.5 text-right font-mono font-semibold text-white">
-                            {formatCurrency(item.actualAnnual)}
-                          </td>
-                          <td className="px-3.5 py-2.5 text-right font-mono">
-                            {hasSpend ? (
-                              <span
-                                className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${
-                                  isOver
-                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                }`}
-                              >
-                                {isOver ? `-${formatCurrency(Math.abs(item.variance))}` : `+${formatCurrency(item.variance)}`}
-                              </span>
-                            ) : (
-                              <span className="text-slate-500">$0</span>
-                            )}
-                          </td>
-                          <td className="px-3.5 py-2.5 min-w-[130px]">
-                            {item.plannedAnnual > 0 ? (
-                              <div className="space-y-1">
-                                <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                                  <span>{Math.round(item.percentUsed)}%</span>
-                                </div>
-                                <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full transition-all ${
-                                      item.percentUsed > 100
-                                        ? 'bg-rose-500'
-                                        : item.percentUsed > 80
-                                        ? 'bg-amber-400'
-                                        : 'bg-emerald-400'
-                                    }`}
-                                    style={{ width: `${Math.min(100, item.percentUsed)}%` }}
-                                  />
-                                </div>
-                              </div>
-                            ) : (
-                              <span className="text-[10px] text-slate-500 italic">No budget set</span>
-                            )}
-                          </td>
-                          <td className="px-3.5 py-2.5">
-                            {Object.keys(item.payers).length > 0 ? (
-                              <div className="flex flex-wrap gap-1 text-[10px]">
-                                {Object.entries(item.payers).map(([payer, amt]) => (
-                                  <span key={payer} className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                                    {payer}: {formatCurrency(amt)}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="text-slate-600 text-[11px]">—</span>
-                            )}
-                          </td>
+              <div className="space-y-3">
+                {/* Dynamic Table Filter Bar */}
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 bg-slate-950/60 border border-slate-800/80 p-2.5 rounded-xl">
+                  <div className="relative w-full sm:w-80">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={tableFilterText}
+                      onChange={(e) => setTableFilterText(e.target.value)}
+                      placeholder="Filter rows (e.g. 2310, gas, living.*12, Spouse)..."
+                      className="w-full bg-slate-900 border border-slate-700/80 rounded-lg pl-8 pr-7 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                    />
+                    {tableFilterText && (
+                      <button
+                        type="button"
+                        onClick={() => setTableFilterText('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-white rounded cursor-pointer"
+                        title="Clear filter"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-slate-400 self-end sm:self-auto">
+                    {tableFilterText.trim() ? (
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-semibold">
+                        Showing {filteredComparisonItems.length} of {comparisonItems.length} rows
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-slate-400 font-medium">
+                        {comparisonItems.length} line items
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {filteredComparisonItems.length === 0 ? (
+                  <div className="bg-slate-950/40 border border-slate-800 rounded-xl p-8 text-center space-y-2.5">
+                    <p className="text-xs text-slate-400 font-medium">
+                      No line items match filter <strong className="text-white font-mono">"{tableFilterText}"</strong>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setTableFilterText('')}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer transition-colors"
+                    >
+                      Clear Filter
+                    </button>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-slate-800 rounded-xl">
+                    <table className="w-full text-left text-xs text-slate-300 divide-y divide-slate-800">
+                      <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] font-bold tracking-wider">
+                        <tr>
+                          <th className="px-3.5 py-2.5">Line Item / Category</th>
+                          <th className="px-3.5 py-2.5 text-right">Planned Budget</th>
+                          <th className="px-3.5 py-2.5 text-right">Actual Spend</th>
+                          <th className="px-3.5 py-2.5 text-right">Variance</th>
+                          <th className="px-3.5 py-2.5">Budget Usage</th>
+                          <th className="px-3.5 py-2.5">Payer Breakdown</th>
+                          <th className="px-3.5 py-2.5 text-center">Actuals</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
+                        {filteredComparisonItems.map((item) => {
+                          const isOver = item.variance < 0;
+                          const hasSpend = item.actualAnnual > 0;
+                          return (
+                            <tr
+                              key={item.id}
+                              onClick={() => {
+                                setSelectedLineItemForBreakdown(item);
+                                setBreakdownFilterText('');
+                                setBreakdownPayerFilter('ALL');
+                                setBreakdownSortField('date');
+                                setBreakdownSortDirection('desc');
+                                setEditingExpenseId(null);
+                              }}
+                              className="hover:bg-slate-800/60 transition-colors cursor-pointer group"
+                              title="Click to view detailed expense breakdown, edit, or delete logged transactions"
+                            >
+                              <td className="px-3.5 py-2.5 font-medium text-white flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 group-hover:scale-125 transition-transform" />
+                                <div>
+                                  <div className="font-semibold text-slate-100 group-hover:text-emerald-300 transition-colors flex items-center gap-1.5">
+                                    <span>{item.name}</span>
+                                    {item.transactionCount > 0 && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold font-mono">
+                                        {item.transactionCount}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500">{item.group}</div>
+                                </div>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right font-mono text-slate-300">
+                                {formatCurrency(item.plannedAnnual)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right font-mono font-semibold text-white">
+                                {formatCurrency(item.actualAnnual)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right font-mono">
+                                {hasSpend ? (
+                                  <span
+                                    className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${
+                                      isOver
+                                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    }`}
+                                  >
+                                    {isOver ? `-${formatCurrency(Math.abs(item.variance))}` : `+${formatCurrency(item.variance)}`}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500">$0</span>
+                                )}
+                              </td>
+                              <td className="px-3.5 py-2.5 min-w-[130px]">
+                                {item.plannedAnnual > 0 ? (
+                                  <div className="space-y-1">
+                                    <div className="flex justify-between text-[10px] font-mono text-slate-400">
+                                      <span>{Math.round(item.percentUsed)}%</span>
+                                    </div>
+                                    <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                                      <div
+                                        className={`h-full rounded-full transition-all ${
+                                          item.percentUsed > 100
+                                            ? 'bg-rose-500'
+                                            : item.percentUsed > 80
+                                            ? 'bg-amber-400'
+                                            : 'bg-emerald-400'
+                                        }`}
+                                        style={{ width: `${Math.min(100, item.percentUsed)}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-slate-500 italic">No budget set</span>
+                                )}
+                              </td>
+                              <td className="px-3.5 py-2.5">
+                                {Object.keys(item.payers).length > 0 ? (
+                                  <div className="flex flex-wrap gap-1 text-[10px]">
+                                    {Object.entries(item.payers).map(([payer, amt]) => (
+                                      <span key={payer} className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                        {payer}: {formatCurrency(amt)}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-600 text-[11px]">—</span>
+                                )}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-center">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedLineItemForBreakdown(item);
+                                    setBreakdownFilterText('');
+                                    setBreakdownPayerFilter('ALL');
+                                    setBreakdownSortField('date');
+                                    setBreakdownSortDirection('desc');
+                                    setEditingExpenseId(null);
+                                  }}
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                                    item.transactionCount > 0
+                                      ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30'
+                                      : 'bg-slate-800/40 hover:bg-slate-800 text-slate-500 hover:text-slate-300 border border-slate-700/50'
+                                  }`}
+                                >
+                                  <span>{item.transactionCount > 0 ? `${item.transactionCount} logs` : 'Breakdown'}</span>
+                                  <ExternalLink className="w-3 h-3 text-emerald-400" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1171,96 +2170,80 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <label className="text-slate-300 font-semibold block mb-1">
                 Realized Equities Return (S&P 500 / Total Stock)
               </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="e.g. 12.5"
-                  value={activeRecord.equityReturnRate !== null && activeRecord.equityReturnRate !== undefined ? Math.round(activeRecord.equityReturnRate * 10000) / 100 : ''}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      'equityReturnRate',
-                      e.target.value === '' ? null : parseFloat(e.target.value) / 100
-                    )
-                  }
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 pr-8 text-white font-mono focus:border-emerald-500 focus:outline-none"
-                />
-                <span className="absolute right-3 top-2 text-slate-400 font-mono font-bold">
-                  %
-                </span>
-              </div>
+              <NumericInput
+                allowDecimals={true}
+                decimalPlaces={2}
+                suffix="%"
+                placeholder="e.g. 12.5"
+                value={activeRecord.equityReturnRate !== null && activeRecord.equityReturnRate !== undefined ? Math.round(activeRecord.equityReturnRate * 10000) / 100 : null}
+                onChange={(val) =>
+                  handleFieldChange(
+                    'equityReturnRate',
+                    val === null ? null : val / 100
+                  )
+                }
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-emerald-500"
+              />
             </div>
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
                 Realized Fixed Income Return (Bonds / Treasuries)
               </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="e.g. 4.0"
-                  value={activeRecord.fixedIncomeReturnRate !== null && activeRecord.fixedIncomeReturnRate !== undefined ? Math.round(activeRecord.fixedIncomeReturnRate * 10000) / 100 : ''}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      'fixedIncomeReturnRate',
-                      e.target.value === '' ? null : parseFloat(e.target.value) / 100
-                    )
-                  }
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 pr-8 text-white font-mono focus:border-emerald-500 focus:outline-none"
-                />
-                <span className="absolute right-3 top-2 text-slate-400 font-mono font-bold">
-                  %
-                </span>
-              </div>
+              <NumericInput
+                allowDecimals={true}
+                decimalPlaces={2}
+                suffix="%"
+                placeholder="e.g. 4.0"
+                value={activeRecord.fixedIncomeReturnRate !== null && activeRecord.fixedIncomeReturnRate !== undefined ? Math.round(activeRecord.fixedIncomeReturnRate * 10000) / 100 : null}
+                onChange={(val) =>
+                  handleFieldChange(
+                    'fixedIncomeReturnRate',
+                    val === null ? null : val / 100
+                  )
+                }
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-emerald-500"
+              />
             </div>
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
                 Realized CPI Headline Inflation Rate
               </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="e.g. 2.8"
-                  value={activeRecord.cpiInflationRate !== null && activeRecord.cpiInflationRate !== undefined ? Math.round(activeRecord.cpiInflationRate * 10000) / 100 : ''}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      'cpiInflationRate',
-                      e.target.value === '' ? null : parseFloat(e.target.value) / 100
-                    )
-                  }
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 pr-8 text-white font-mono focus:border-emerald-500 focus:outline-none"
-                />
-                <span className="absolute right-3 top-2 text-slate-400 font-mono font-bold">
-                  %
-                </span>
-              </div>
+              <NumericInput
+                allowDecimals={true}
+                decimalPlaces={2}
+                suffix="%"
+                placeholder="e.g. 2.8"
+                value={activeRecord.cpiInflationRate !== null && activeRecord.cpiInflationRate !== undefined ? Math.round(activeRecord.cpiInflationRate * 10000) / 100 : null}
+                onChange={(val) =>
+                  handleFieldChange(
+                    'cpiInflationRate',
+                    val === null ? null : val / 100
+                  )
+                }
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-emerald-500"
+              />
             </div>
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
                 Realized Healthcare Inflation Rate
               </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="e.g. 5.0"
-                  value={activeRecord.healthcareInflationRate !== null && activeRecord.healthcareInflationRate !== undefined ? Math.round(activeRecord.healthcareInflationRate * 10000) / 100 : ''}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      'healthcareInflationRate',
-                      e.target.value === '' ? null : parseFloat(e.target.value) / 100
-                    )
-                  }
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 pr-8 text-white font-mono focus:border-emerald-500 focus:outline-none"
-                />
-                <span className="absolute right-3 top-2 text-slate-400 font-mono font-bold">
-                  %
-                </span>
-              </div>
+              <NumericInput
+                allowDecimals={true}
+                decimalPlaces={2}
+                suffix="%"
+                placeholder="e.g. 5.0"
+                value={activeRecord.healthcareInflationRate !== null && activeRecord.healthcareInflationRate !== undefined ? Math.round(activeRecord.healthcareInflationRate * 10000) / 100 : null}
+                onChange={(val) =>
+                  handleFieldChange(
+                    'healthcareInflationRate',
+                    val === null ? null : val / 100
+                  )
+                }
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-emerald-500"
+              />
             </div>
           </div>
         </div>
@@ -1284,20 +2267,14 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           <div className="space-y-3 text-xs">
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
-                Total Annual Living Expenses
+                Living Expenses (Excluding Healthcare) ($)
               </label>
-              <input
-                type="number"
-                step="100"
-                placeholder={`Budgeted: ${formatCurrency((inputs.annualLivingExpenses ?? 100000) * (activeLedgerRow?.cpiFactor || 1))}`}
-                value={activeRecord.totalLivingExpenses !== null && activeRecord.totalLivingExpenses !== undefined ? activeRecord.totalLivingExpenses : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'totalLivingExpenses',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-sky-500 focus:outline-none"
+              <NumericInput
+                prefix="$"
+                placeholder={`Budgeted: ${formatCurrency(getPlannedRecurringBudgetForYear(selectedYear) * (activeLedgerRow?.cpiFactor || 1))}`}
+                value={activeRecord.totalLivingExpenses}
+                onChange={(val) => handleFieldChange('totalLivingExpenses', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
               />
             </div>
 
@@ -1309,14 +2286,12 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 {DEFAULT_EXPENSE_CATEGORIES.map((cat) => (
                   <div key={cat} className="flex items-center justify-between gap-2">
                     <span className="text-slate-400">{cat}:</span>
-                    <input
-                      type="number"
-                      placeholder="$0"
-                      value={activeRecord.categoryExpenses?.[cat] || ''}
-                      onChange={(e) =>
-                        handleCategoryCostChange(cat, e.target.value === '' ? 0 : parseFloat(e.target.value))
-                      }
-                      className="w-28 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-right text-white font-mono text-xs"
+                    <NumericInput
+                      prefix="$"
+                      placeholder="0"
+                      value={activeRecord.categoryExpenses?.[cat]}
+                      onChange={(val) => handleCategoryCostChange(cat, val ?? 0)}
+                      className="w-28 h-7 bg-slate-900 border-slate-700 text-right text-white font-mono text-xs"
                     />
                   </div>
                 ))}
@@ -1325,55 +2300,72 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
-                Pre-Medicare Healthcare Costs (Annual)
+                Actual Healthcare OOP (Co-pays & Deductibles) ($)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
+                placeholder={`Allowance Ceiling: ${formatCurrency(activeLedgerRow?.plannedHealthcareOOP ?? 0)}`}
+                value={activeRecord.healthcareOOP}
+                onChange={(val) => handleFieldChange('healthcareOOP', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
+              />
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Maximum allowance ceiling is budgeted. Only actual spend reduces portfolio; unspent allowance remains invested.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">
+                Pre-Medicare Healthcare Premiums ($)
+              </label>
+              <NumericInput
+                prefix="$"
                 placeholder="Optional override ($)"
-                value={activeRecord.preMedicareHealthcareCost !== null && activeRecord.preMedicareHealthcareCost !== undefined ? activeRecord.preMedicareHealthcareCost : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'preMedicareHealthcareCost',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-sky-500 focus:outline-none"
+                value={activeRecord.preMedicareHealthcareCost}
+                onChange={(val) => handleFieldChange('preMedicareHealthcareCost', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
               />
             </div>
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
-                Medicare Base Premiums (Annual)
+                Medicare Base Premiums (Part B + Supp/D) ($)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
                 placeholder="Optional override ($)"
-                value={activeRecord.medicareBasePremiums !== null && activeRecord.medicareBasePremiums !== undefined ? activeRecord.medicareBasePremiums : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'medicareBasePremiums',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-sky-500 focus:outline-none"
+                value={activeRecord.medicareBasePremiums}
+                onChange={(val) => handleFieldChange('medicareBasePremiums', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
               />
+            </div>
+
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">
+                Medicare IRMAA Surcharges (Part B & D) ($)
+              </label>
+              <NumericInput
+                prefix="$"
+                placeholder={`Planned Surcharges: ${formatCurrency(activeLedgerRow?.combinedSurchargeAnnual ?? 0)}`}
+                value={activeRecord.irmaaSurcharges}
+                onChange={(val) => handleFieldChange('irmaaSurcharges', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
+              />
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Optional override for realized IRMAA Part B & D surcharge premiums.
+              </p>
             </div>
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1">
                 Actual Charitable Giving & Tithe ($)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
                 placeholder="Optional override ($)"
-                value={activeRecord.charitableTithe !== null && activeRecord.charitableTithe !== undefined ? activeRecord.charitableTithe : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'charitableTithe',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-sky-500 focus:outline-none"
+                value={activeRecord.charitableTithe}
+                onChange={(val) => handleFieldChange('charitableTithe', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-sky-500"
               />
             </div>
           </div>
@@ -1393,14 +2385,12 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <label className="text-slate-300 font-semibold block mb-1">
                 Realized MAGI / AGI (Feeds 2-Yr Lookback)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
                 placeholder={`Replayed: ${formatCurrency(activeLedgerRow?.magi)}`}
-                value={activeRecord.magi !== null && activeRecord.magi !== undefined ? activeRecord.magi : ''}
-                onChange={(e) =>
-                  handleFieldChange('magi', e.target.value === '' ? null : parseFloat(e.target.value))
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-purple-500 focus:outline-none"
+                value={activeRecord.magi}
+                onChange={(val) => handleFieldChange('magi', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500"
               />
               <p className="text-[11px] text-slate-500 mt-0.5">
                 Automatically determines Medicare IRMAA tiers for {selectedYear + 2}.
@@ -1411,17 +2401,12 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <label className="text-slate-300 font-semibold block mb-1">
                 Total Income Taxes Paid (Fed + State)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
                 placeholder={`Replayed: ${formatCurrency(activeLedgerRow?.totalIncomeTax)}`}
-                value={activeRecord.totalIncomeTax !== null && activeRecord.totalIncomeTax !== undefined ? activeRecord.totalIncomeTax : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'totalIncomeTax',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-purple-500 focus:outline-none"
+                value={activeRecord.totalIncomeTax}
+                onChange={(val) => handleFieldChange('totalIncomeTax', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500"
               />
             </div>
 
@@ -1429,17 +2414,12 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <label className="text-slate-300 font-semibold block mb-1">
                 Earned Gross Salary - Primary ($)
               </label>
-              <input
-                type="number"
+              <NumericInput
+                prefix="$"
                 placeholder="Active paycheck salary earned"
-                value={activeRecord.earnedSalaryYou !== null && activeRecord.earnedSalaryYou !== undefined ? activeRecord.earnedSalaryYou : ''}
-                onChange={(e) =>
-                  handleFieldChange(
-                    'earnedSalaryYou',
-                    e.target.value === '' ? null : parseFloat(e.target.value)
-                  )
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-purple-500 focus:outline-none"
+                value={activeRecord.earnedSalaryYou}
+                onChange={(val) => handleFieldChange('earnedSalaryYou', val)}
+                className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500"
               />
             </div>
 
@@ -1448,18 +2428,58 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 <label className="text-slate-300 font-semibold block mb-1">
                   Earned Gross Salary - Spouse ($)
                 </label>
-                <input
-                  type="number"
+                <NumericInput
+                  prefix="$"
                   placeholder="Active paycheck salary earned"
-                  value={activeRecord.earnedSalaryWife !== null && activeRecord.earnedSalaryWife !== undefined ? activeRecord.earnedSalaryWife : ''}
-                  onChange={(e) =>
-                    handleFieldChange(
-                      'earnedSalaryWife',
-                      e.target.value === '' ? null : parseFloat(e.target.value)
-                    )
-                  }
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:border-purple-500 focus:outline-none"
+                  value={activeRecord.earnedSalaryWife}
+                  onChange={(val) => handleFieldChange('earnedSalaryWife', val)}
+                  className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500"
                 />
+              </div>
+            )}
+
+            {onUpdatePriorTaxReturnMAGI && (
+              <div className="pt-3 border-t border-slate-800 space-y-3">
+                <span className="text-[11px] font-bold text-purple-400 uppercase tracking-wider block">
+                  Prior Tax Return MAGI (2-Year IRMAA Lookback)
+                </span>
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">
+                    2024 Form 1040 MAGI (Feeds 2026 IRMAA)
+                  </label>
+                  <NumericInput
+                    prefix="$"
+                    placeholder="Optional (Defaults to 2026 salary/yields)"
+                    value={inputs.priorTaxReturnMAGI?.[2024]}
+                    onChange={(val) =>
+                      onUpdatePriorTaxReturnMAGI({
+                        ...(inputs.priorTaxReturnMAGI || {}),
+                        2024: val,
+                      })
+                    }
+                    className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500 focus:ring-purple-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">
+                    2025 Form 1040 MAGI (Feeds 2027 IRMAA)
+                  </label>
+                  <NumericInput
+                    prefix="$"
+                    placeholder="Optional (Defaults to 2026 salary/yields)"
+                    value={inputs.priorTaxReturnMAGI?.[2025]}
+                    onChange={(val) =>
+                      onUpdatePriorTaxReturnMAGI({
+                        ...(inputs.priorTaxReturnMAGI || {}),
+                        2025: val,
+                      })
+                    }
+                    className="h-9 bg-slate-950 border-slate-700 text-white font-mono focus:border-purple-500 focus:ring-purple-500"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  IRS Form 1040 Line 11 + tax-exempt interest from prior returns. Used by Medicare to evaluate Part B & D surcharge tiers in simulation years 2026 and 2027. Updates simulation on blur.
+                </p>
               </div>
             )}
           </div>
@@ -1494,77 +2514,52 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-slate-400 block mb-1">Pre-Tax (Traditional IRA)</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    prefix="$"
                     placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endYourPreTaxIRA)}`}
-                    value={activeRecord.endYourPreTaxIRA !== null && activeRecord.endYourPreTaxIRA !== undefined ? activeRecord.endYourPreTaxIRA : ''}
-                    onChange={(e) =>
-                      handleFieldChange(
-                        'endYourPreTaxIRA',
-                        e.target.value === '' ? null : parseFloat(e.target.value)
-                      )
-                    }
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    value={activeRecord.endYourPreTaxIRA}
+                    onChange={(val) => handleFieldChange('endYourPreTaxIRA', val)}
+                    className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
                   <label className="text-slate-400 block mb-1">Roth IRA</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    prefix="$"
                     placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endYourRothIRA)}`}
-                    value={activeRecord.endYourRothIRA !== null && activeRecord.endYourRothIRA !== undefined ? activeRecord.endYourRothIRA : ''}
-                    onChange={(e) =>
-                      handleFieldChange(
-                        'endYourRothIRA',
-                        e.target.value === '' ? null : parseFloat(e.target.value)
-                      )
-                    }
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    value={activeRecord.endYourRothIRA}
+                    onChange={(val) => handleFieldChange('endYourRothIRA', val)}
+                    className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
                   <label className="text-slate-400 block mb-1">Taxable Brokerage</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    prefix="$"
                     placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endYourTaxableBrokerage)}`}
-                    value={activeRecord.endYourTaxableBrokerage !== null && activeRecord.endYourTaxableBrokerage !== undefined ? activeRecord.endYourTaxableBrokerage : ''}
-                    onChange={(e) =>
-                      handleFieldChange(
-                        'endYourTaxableBrokerage',
-                        e.target.value === '' ? null : parseFloat(e.target.value)
-                      )
-                    }
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    value={activeRecord.endYourTaxableBrokerage}
+                    onChange={(val) => handleFieldChange('endYourTaxableBrokerage', val)}
+                    className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
                   <label className="text-slate-400 block mb-1">Taxable Cost Basis</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    prefix="$"
                     placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endYourTaxableBasis)}`}
-                    value={activeRecord.endYourTaxableBasis !== null && activeRecord.endYourTaxableBasis !== undefined ? activeRecord.endYourTaxableBasis : ''}
-                    onChange={(e) =>
-                      handleFieldChange(
-                        'endYourTaxableBasis',
-                        e.target.value === '' ? null : parseFloat(e.target.value)
-                      )
-                    }
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    value={activeRecord.endYourTaxableBasis}
+                    onChange={(val) => handleFieldChange('endYourTaxableBasis', val)}
+                    className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div className="col-span-2">
                   <label className="text-slate-400 block mb-1">Cash Reserve Savings</label>
-                  <input
-                    type="number"
+                  <NumericInput
+                    prefix="$"
                     placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endYourCash)}`}
-                    value={activeRecord.endYourCash !== null && activeRecord.endYourCash !== undefined ? activeRecord.endYourCash : ''}
-                    onChange={(e) =>
-                      handleFieldChange(
-                        'endYourCash',
-                        e.target.value === '' ? null : parseFloat(e.target.value)
-                      )
-                    }
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                    value={activeRecord.endYourCash}
+                    onChange={(val) => handleFieldChange('endYourCash', val)}
+                    className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                   />
                 </div>
               </div>
@@ -1579,77 +2574,52 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-slate-400 block mb-1">Pre-Tax (Traditional IRA)</label>
-                    <input
-                      type="number"
+                    <NumericInput
+                      prefix="$"
                       placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endWifePreTaxIRA)}`}
-                      value={activeRecord.endWifePreTaxIRA !== null && activeRecord.endWifePreTaxIRA !== undefined ? activeRecord.endWifePreTaxIRA : ''}
-                      onChange={(e) =>
-                        handleFieldChange(
-                          'endWifePreTaxIRA',
-                          e.target.value === '' ? null : parseFloat(e.target.value)
-                        )
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                      value={activeRecord.endWifePreTaxIRA}
+                      onChange={(val) => handleFieldChange('endWifePreTaxIRA', val)}
+                      className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                     />
                   </div>
                   <div>
                     <label className="text-slate-400 block mb-1">Roth IRA</label>
-                    <input
-                      type="number"
+                    <NumericInput
+                      prefix="$"
                       placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endWifeRothIRA)}`}
-                      value={activeRecord.endWifeRothIRA !== null && activeRecord.endWifeRothIRA !== undefined ? activeRecord.endWifeRothIRA : ''}
-                      onChange={(e) =>
-                        handleFieldChange(
-                          'endWifeRothIRA',
-                          e.target.value === '' ? null : parseFloat(e.target.value)
-                        )
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                      value={activeRecord.endWifeRothIRA}
+                      onChange={(val) => handleFieldChange('endWifeRothIRA', val)}
+                      className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                     />
                   </div>
                   <div>
                     <label className="text-slate-400 block mb-1">Taxable Brokerage</label>
-                    <input
-                      type="number"
+                    <NumericInput
+                      prefix="$"
                       placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endWifeTaxableBrokerage)}`}
-                      value={activeRecord.endWifeTaxableBrokerage !== null && activeRecord.endWifeTaxableBrokerage !== undefined ? activeRecord.endWifeTaxableBrokerage : ''}
-                      onChange={(e) =>
-                        handleFieldChange(
-                          'endWifeTaxableBrokerage',
-                          e.target.value === '' ? null : parseFloat(e.target.value)
-                        )
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                      value={activeRecord.endWifeTaxableBrokerage}
+                      onChange={(val) => handleFieldChange('endWifeTaxableBrokerage', val)}
+                      className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                     />
                   </div>
                   <div>
                     <label className="text-slate-400 block mb-1">Taxable Cost Basis</label>
-                    <input
-                      type="number"
+                    <NumericInput
+                      prefix="$"
                       placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endWifeTaxableBasis)}`}
-                      value={activeRecord.endWifeTaxableBasis !== null && activeRecord.endWifeTaxableBasis !== undefined ? activeRecord.endWifeTaxableBasis : ''}
-                      onChange={(e) =>
-                        handleFieldChange(
-                          'endWifeTaxableBasis',
-                          e.target.value === '' ? null : parseFloat(e.target.value)
-                        )
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                      value={activeRecord.endWifeTaxableBasis}
+                      onChange={(val) => handleFieldChange('endWifeTaxableBasis', val)}
+                      className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                     />
                   </div>
                   <div className="col-span-2">
                     <label className="text-slate-400 block mb-1">Cash Reserve Savings</label>
-                    <input
-                      type="number"
+                    <NumericInput
+                      prefix="$"
                       placeholder={`Calc: ${formatCurrency(activeLedgerRow?.endWifeCash)}`}
-                      value={activeRecord.endWifeCash !== null && activeRecord.endWifeCash !== undefined ? activeRecord.endWifeCash : ''}
-                      onChange={(e) =>
-                        handleFieldChange(
-                          'endWifeCash',
-                          e.target.value === '' ? null : parseFloat(e.target.value)
-                        )
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
+                      value={activeRecord.endWifeCash}
+                      onChange={(val) => handleFieldChange('endWifeCash', val)}
+                      className="h-8 bg-slate-900 border-slate-700 text-white font-mono"
                     />
                   </div>
                 </div>
@@ -1745,6 +2715,383 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {/* Line Item Breakdown Modal */}
+      {selectedLineItemForBreakdown && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-4xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/40">
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="p-2.5 rounded-2xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shrink-0">
+                  <Tag className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-base font-bold text-white truncate">
+                      {selectedLineItemForBreakdown.name}
+                    </h2>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold border border-slate-700">
+                      {selectedLineItemForBreakdown.group}
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
+                      Year {selectedYear}{selectedMonthFilter ? ` • Month ${selectedMonthFilter}` : ''}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Individual actual expenses logged for this line item. Edit or delete entries to correct mistakes.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedLineItemForBreakdown(null);
+                  setEditingExpenseId(null);
+                }}
+                className="p-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors cursor-pointer shrink-0 ml-3"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Quick Stats Bar */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 bg-slate-950/60 border-b border-slate-800 text-xs">
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5">
+                <span className="text-[10px] text-slate-400 block font-medium uppercase tracking-wider">Planned Budget</span>
+                <span className="text-sm font-bold font-mono text-slate-200">
+                  {formatCurrency(selectedLineItemForBreakdown.plannedAnnual)}
+                </span>
+              </div>
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5">
+                <span className="text-[10px] text-slate-400 block font-medium uppercase tracking-wider">Actual Spend</span>
+                <span className="text-sm font-bold font-mono text-emerald-400">
+                  {formatCurrency(activeLineItemExpenses.reduce((sum, e) => sum + e.amount, 0))}
+                </span>
+              </div>
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5">
+                <span className="text-[10px] text-slate-400 block font-medium uppercase tracking-wider">Transactions</span>
+                <span className="text-sm font-bold font-mono text-white">
+                  {activeLineItemExpenses.length} logged
+                </span>
+              </div>
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5">
+                <span className="text-[10px] text-slate-400 block font-medium uppercase tracking-wider">Average / Log</span>
+                <span className="text-sm font-bold font-mono text-slate-300">
+                  {activeLineItemExpenses.length > 0
+                    ? formatCurrency(activeLineItemExpenses.reduce((sum, e) => sum + e.amount, 0) / activeLineItemExpenses.length)
+                    : '$0'}
+                </span>
+              </div>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="p-3.5 bg-slate-900/80 border-b border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-1">
+                <div className="relative flex-1 max-w-sm flex items-center bg-slate-950 border border-slate-800 focus-within:border-emerald-500 rounded-xl px-2.5 py-1.5 transition-all">
+                  <Search className="w-3.5 h-3.5 text-slate-500 mr-2 shrink-0" />
+                  <input
+                    type="text"
+                    value={breakdownFilterText}
+                    onChange={(e) => setBreakdownFilterText(e.target.value)}
+                    placeholder="Filter by note, amount, date, purchaser..."
+                    className="w-full bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none"
+                  />
+                  {breakdownFilterText && (
+                    <button
+                      type="button"
+                      onClick={() => setBreakdownFilterText('')}
+                      className="p-0.5 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+
+                {availableBreakdownPayers.length > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-slate-400 font-medium hidden md:inline">Purchaser:</span>
+                    <select
+                      value={breakdownPayerFilter}
+                      onChange={(e) => setBreakdownPayerFilter(e.target.value)}
+                      className="bg-slate-950 border border-slate-800 text-slate-300 text-xs rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="ALL">All Payers</option>
+                      {availableBreakdownPayers.map((p) => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="text-[11px] text-slate-400 flex items-center gap-2 self-end sm:self-auto">
+                <span>
+                  Showing <strong className="text-white">{filteredAndSortedLineItemExpenses.length}</strong> of {activeLineItemExpenses.length}
+                </span>
+                {(breakdownFilterText || breakdownPayerFilter !== 'ALL') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBreakdownFilterText('');
+                      setBreakdownPayerFilter('ALL');
+                    }}
+                    className="text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer"
+                  >
+                    Clear filter
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Error Message banner if edit fails */}
+            {expenseEditError && (
+              <div className="mx-4 mt-3 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{expenseEditError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExpenseEditError(null)}
+                  className="text-slate-400 hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Scrollable Tabular Display */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
+              {activeLineItemExpenses.length === 0 ? (
+                <div className="py-16 text-center space-y-2 px-4">
+                  <Tag className="w-8 h-8 text-slate-600 mx-auto" />
+                  <p className="text-sm font-semibold text-slate-300">
+                    No actual expenses logged for {selectedLineItemForBreakdown.name} in {selectedYear}.
+                  </p>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    When purchases are logged in the Expenser app or via cloud sync with this category, they will appear here.
+                  </p>
+                </div>
+              ) : filteredAndSortedLineItemExpenses.length === 0 ? (
+                <div className="py-12 text-center text-slate-400 text-xs">
+                  No logged expenses match &ldquo;{breakdownFilterText}&rdquo;.
+                </div>
+              ) : (
+                <table className="w-full text-left text-xs text-slate-300 divide-y divide-slate-800">
+                  <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] font-bold tracking-wider sticky top-0 z-10 backdrop-blur">
+                    <tr>
+                      <th
+                        onClick={() => handleToggleSort('date')}
+                        className="px-4 py-3 cursor-pointer hover:text-white transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Expense Date</span>
+                          {breakdownSortField === 'date' ? (
+                            breakdownSortDirection === 'asc' ? (
+                              <ArrowUp className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <ArrowDown className="w-3 h-3 text-emerald-400" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="w-3 h-3 text-slate-600" />
+                          )}
+                        </div>
+                      </th>
+                      <th
+                        onClick={() => handleToggleSort('amount')}
+                        className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors"
+                      >
+                        <div className="flex items-center justify-end gap-1.5">
+                          <span>Amount</span>
+                          {breakdownSortField === 'amount' ? (
+                            breakdownSortDirection === 'asc' ? (
+                              <ArrowUp className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <ArrowDown className="w-3 h-3 text-emerald-400" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="w-3 h-3 text-slate-600" />
+                          )}
+                        </div>
+                      </th>
+                      <th
+                        onClick={() => handleToggleSort('enteredBy')}
+                        className="px-4 py-3 cursor-pointer hover:text-white transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Who Entered</span>
+                          {breakdownSortField === 'enteredBy' ? (
+                            breakdownSortDirection === 'asc' ? (
+                              <ArrowUp className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <ArrowDown className="w-3 h-3 text-emerald-400" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="w-3 h-3 text-slate-600" />
+                          )}
+                        </div>
+                      </th>
+                      <th className="px-4 py-3">Note / Memo</th>
+                      <th className="px-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 bg-slate-900/30">
+                    {filteredAndSortedLineItemExpenses.map((exp) => {
+                      const isEditing = editingExpenseId === exp.expenseId;
+
+                      if (isEditing) {
+                        return (
+                          <tr key={exp.expenseId} className="bg-emerald-950/20 border-y border-emerald-500/30">
+                            <td className="px-4 py-2.5">
+                              <input
+                                type="date"
+                                value={editExpenseDate}
+                                onChange={(e) => setEditExpenseDate(e.target.value)}
+                                className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-emerald-500 [color-scheme:dark]"
+                                required
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-right">
+                              <div className="relative inline-flex items-center">
+                                <span className="text-emerald-400 font-bold mr-1">$</span>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0.01"
+                                  value={editExpenseAmount}
+                                  onChange={(e) => setEditExpenseAmount(e.target.value)}
+                                  className="w-24 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono font-bold text-white text-right focus:outline-none focus:border-emerald-500"
+                                  required
+                                />
+                              </div>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <input
+                                type="text"
+                                value={editExpensePayer}
+                                onChange={(e) => setEditExpensePayer(e.target.value)}
+                                placeholder="Payer name"
+                                className="w-28 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-emerald-500"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <input
+                                type="text"
+                                value={editExpenseNotes}
+                                onChange={(e) => setEditExpenseNotes(e.target.value)}
+                                placeholder="Add note / store..."
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-emerald-500"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={isSavingExpenseEdit}
+                                  onClick={() => handleSaveExpenseEdit(exp.expenseId)}
+                                  className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50"
+                                  title="Save changes"
+                                >
+                                  {isSavingExpenseEdit ? (
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Check className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isSavingExpenseEdit}
+                                  onClick={() => setEditingExpenseId(null)}
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-xs transition-colors cursor-pointer"
+                                  title="Cancel edit"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
+
+                      return (
+                        <tr key={exp.expenseId} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="px-4 py-3 font-mono text-slate-200">
+                            {exp.date}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-bold text-emerald-400 text-sm">
+                            {formatCurrency(exp.amount)}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[11px] font-medium border border-slate-700/60">
+                              {exp.enteredBy || 'Primary'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-slate-300">
+                            {exp.notes ? (
+                              <span className="text-amber-200/90">{exp.notes}</span>
+                            ) : (
+                              <span className="text-slate-600 italic text-[11px]">No note</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditExpense(exp)}
+                                className="p-1.5 text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-colors cursor-pointer"
+                                title="Edit this transaction"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteLoggedExpense(exp.expenseId)}
+                                className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                                title="Delete this transaction"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-950/70 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+              <span className="hidden sm:inline">
+                {storageSyncMessage}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedLineItemForBreakdown(null);
+                  setEditingExpenseId(null);
+                }}
+                className="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-semibold transition-colors cursor-pointer ml-auto"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Import / Backfill Expenses Modal */}
+      {showImportModal && (
+        <ImportExpensesModal
+          isOpen={showImportModal}
+          onClose={() => setShowImportModal(false)}
+          selectedYear={selectedYear}
+          onImportComplete={async () => {
+            await loadLoggedExpenses();
+          }}
+          onUpdateActualsLivingExpenses={handleUpdateActualsLivingExpenses}
+        />
       )}
     </div>
   );

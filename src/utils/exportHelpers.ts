@@ -1,6 +1,6 @@
 import { pdf } from '@react-pdf/renderer';
 import React from 'react';
-import { AppStateInputs, SimulationResultRow } from '../types';
+import { AppStateInputs, SavedPlan, SimulationResultRow } from '../types';
 import { ConfigurationPDF } from '../components/ConfigurationPDF';
 import { generateExcelBlob } from './excelExport';
 
@@ -85,13 +85,21 @@ export const getDefaultExportFileName = (
   }
 };
 
+export interface PlanExportJsonPayload extends AppStateInputs {
+  savedPlans?: SavedPlan[];
+  customScenarios?: unknown[];
+}
+
 export const generateJsonBlob = (
   inputs: AppStateInputs,
-  simulateSurvivor?: boolean
+  simulateSurvivor?: boolean,
+  savedPlans?: SavedPlan[]
 ): Blob => {
-  const payload: AppStateInputs = {
+  const payload: PlanExportJsonPayload = {
     ...inputs,
     simulateSurvivor: simulateSurvivor !== undefined ? simulateSurvivor : (inputs.simulateSurvivor ?? false),
+    savedPlans: savedPlans || [],
+    customScenarios: inputs.customRothScenarios || [],
   };
   const dataStr = JSON.stringify(payload, null, 2);
   return new Blob([dataStr], { type: 'application/json' });

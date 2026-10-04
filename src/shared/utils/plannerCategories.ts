@@ -76,6 +76,34 @@ export function getPlannerExpenseCatalog(activeState?: string): PlannerExpenseLi
     }
   }
 
+  // Ensure standard Healthcare items are available in catalog
+  if (!seenIds.has('healthcare-oop')) {
+    lineItems.push({
+      id: 'healthcare-oop',
+      groupCategory: 'Healthcare',
+      name: 'Healthcare Out-of-Pocket Co-pays & Deductibles',
+      displayName: 'Healthcare - Out-of-Pocket Co-pays & Deductibles',
+      plannedMonthlyDefault: 500,
+      color: GROUP_COLORS['Healthcare'] || '#ef4444',
+      icon: 'Tag',
+      isCustom: false,
+    });
+    seenIds.add('healthcare-oop');
+  }
+  if (!seenIds.has('healthcare-premiums')) {
+    lineItems.push({
+      id: 'healthcare-premiums',
+      groupCategory: 'Healthcare',
+      name: 'Healthcare Insurance Premiums',
+      displayName: 'Healthcare - Insurance Premiums',
+      plannedMonthlyDefault: 0,
+      color: GROUP_COLORS['Healthcare'] || '#ef4444',
+      icon: 'Tag',
+      isCustom: false,
+    });
+    seenIds.add('healthcare-premiums');
+  }
+
   return lineItems;
 }
 
@@ -97,17 +125,32 @@ export function savePlannerExpenseLineItem(item: {
     if (!name) return null;
 
     // Check if category group exists in catalog.categories
-    if (!norm.catalog.categories.includes(group)) {
+    const hasCategory = norm.catalog.categories.includes(group);
+    if (!hasCategory) {
       norm.catalog.categories.push(group);
     }
 
     // Check if item exists in catalog.items
     let existing = norm.catalog.items.find(
-      i => i.name.trim().toLowerCase() === name.toLowerCase() && i.category.trim().toLowerCase() === group.toLowerCase()
+      i => (item.id && i.id === item.id) || (i.name.trim().toLowerCase() === name.toLowerCase() && i.category.trim().toLowerCase() === group.toLowerCase())
     );
 
     const itemId = existing?.id || item.id || `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const monthlyCost = Number(item.plannedMonthlyDefault) || 0;
+
+    if (existing && hasCategory) {
+      // Already present in catalog, return without dispatching redundant storage events
+      return {
+        id: existing.id,
+        groupCategory: existing.category,
+        name: existing.name,
+        displayName: `${existing.category} - ${existing.name}`,
+        plannedMonthlyDefault: norm.costs?.MD?.[existing.id] ?? norm.costs?.ALL?.[existing.id] ?? monthlyCost,
+        color: GROUP_COLORS[existing.category] || '#6366f1',
+        icon: 'Tag',
+        isCustom: false,
+      };
+    }
 
     if (!existing) {
       const newItem: ExpenseItemDefinition = {
@@ -125,15 +168,18 @@ export function savePlannerExpenseLineItem(item: {
       existing.applicableStates = item.applicableStates;
     }
 
-    // Set frequencies and costs
-    norm.frequencies[itemId] = 12;
+    // Set frequencies and costs without overwriting existing non-zero values
+    norm.frequencies = norm.frequencies || {};
+    if (norm.frequencies[itemId] === undefined) {
+      norm.frequencies[itemId] = 12;
+    }
     norm.costs = norm.costs || {};
     norm.costs.ALL = norm.costs.ALL || {};
     norm.costs.MD = norm.costs.MD || {};
     norm.costs.FL = norm.costs.FL || {};
-    norm.costs.ALL[itemId] = monthlyCost;
-    norm.costs.MD[itemId] = monthlyCost;
-    norm.costs.FL[itemId] = monthlyCost;
+    if (norm.costs.ALL[itemId] === undefined) norm.costs.ALL[itemId] = monthlyCost;
+    if (norm.costs.MD[itemId] === undefined) norm.costs.MD[itemId] = monthlyCost;
+    if (norm.costs.FL[itemId] === undefined) norm.costs.FL[itemId] = monthlyCost;
     norm.MD = norm.costs.MD;
     norm.FL = norm.costs.FL;
 
@@ -141,8 +187,14 @@ export function savePlannerExpenseLineItem(item: {
     window.localStorage.setItem('retirement_planner_inputs', JSON.stringify(parsed));
 
     // Dispatch custom and storage event for live UI reactivity across tabs
-    window.dispatchEvent(new Event('storage'));
-    window.dispatchEvent(new CustomEvent('retirement_planner_inputs_updated', { detail: parsed }));
+    if (typeof Event !== 'undefined') {
+      window.dispatchEvent(new Event('storage'));
+    }
+    if (typeof CustomEvent !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('retirement_planner_inputs_updated', { detail: parsed }));
+    } else if (typeof Event !== 'undefined') {
+      window.dispatchEvent(new Event('retirement_planner_inputs_updated'));
+    }
 
     const displayName = `${group} - ${name}`;
     return {
@@ -161,11 +213,114 @@ export function savePlannerExpenseLineItem(item: {
   }
 }
 
+/**
+ * Atomically registers a batch of line items into the planner catalog in a single memory pass
+ * with a single localStorage write and no redundant reactive event spam during bulk imports.
+ */
+export function batchRegisterPlannerExpenseLineItems(
+  items: Array<{ name: string; groupCategory: string; plannedMonthlyDefault?: number }>
+): Map<string, PlannerExpenseLineItem> {
+  const resultMap = new Map<string, PlannerExpenseLineItem>();
+  if (typeof window === 'undefined' || items.length === 0) return resultMap;
+
+  try {
+    const raw = window.localStorage.getItem('retirement_planner_inputs');
+    const parsed = raw ? JSON.parse(raw) : {};
+    const norm = normalizeDetailedExpenses(parsed.detailedExpenses);
+    let hasModifications = false;
+
+    norm.frequencies = norm.frequencies || {};
+    norm.costs = norm.costs || {};
+    norm.costs.ALL = norm.costs.ALL || {};
+    norm.costs.MD = norm.costs.MD || {};
+    norm.costs.FL = norm.costs.FL || {};
+
+    for (const item of items) {
+      const group = (item.groupCategory || 'Living').trim();
+      const name = item.name.trim();
+      if (!name) continue;
+
+      const mapKey = `${group.toLowerCase()}:::${name.toLowerCase()}`;
+
+      // Check group category
+      if (!norm.catalog.categories.includes(group)) {
+        norm.catalog.categories.push(group);
+        hasModifications = true;
+      }
+
+      // Check item
+      let existing = norm.catalog.items.find(
+        i => i.name.trim().toLowerCase() === name.toLowerCase() && i.category.trim().toLowerCase() === group.toLowerCase()
+      );
+
+      const itemId = existing?.id || `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const monthlyCost = Number(item.plannedMonthlyDefault) || 0;
+
+      if (!existing) {
+        const newItem: ExpenseItemDefinition = {
+          id: itemId,
+          name,
+          category: group,
+          defaultFrequency: 12,
+          isOneTime: false,
+          targetYear: null,
+          applicableStates: ['ALL'],
+        };
+        norm.catalog.items.push(newItem);
+        existing = newItem;
+        hasModifications = true;
+      }
+
+      if (norm.frequencies[itemId] === undefined) {
+        norm.frequencies[itemId] = 12;
+        hasModifications = true;
+      }
+      if (norm.costs.ALL[itemId] === undefined) {
+        norm.costs.ALL[itemId] = monthlyCost;
+        hasModifications = true;
+      }
+      if (norm.costs.MD[itemId] === undefined) {
+        norm.costs.MD[itemId] = monthlyCost;
+        hasModifications = true;
+      }
+      if (norm.costs.FL[itemId] === undefined) {
+        norm.costs.FL[itemId] = monthlyCost;
+        hasModifications = true;
+      }
+
+      const displayName = `${group} - ${name}`;
+      resultMap.set(mapKey, {
+        id: itemId,
+        groupCategory: group,
+        name,
+        displayName,
+        plannedMonthlyDefault: norm.costs.MD[itemId] ?? norm.costs.ALL[itemId] ?? monthlyCost,
+        color: GROUP_COLORS[group] || '#6366f1',
+        icon: 'Tag',
+        isCustom: false,
+      });
+    }
+
+    if (hasModifications) {
+      norm.MD = norm.costs.MD;
+      norm.FL = norm.costs.FL;
+      parsed.detailedExpenses = norm;
+      window.localStorage.setItem('retirement_planner_inputs', JSON.stringify(parsed));
+    }
+  } catch (err) {
+    console.error('Failed to batch register line items to planner inputs:', err);
+  }
+
+  return resultMap;
+}
+
 export function syncCustomCategoriesToPlanner(customCategories: ExpenseCategory[]): void {
   if (typeof window === 'undefined' || !customCategories || customCategories.length === 0) return;
   for (const cat of customCategories) {
-    if (!cat.isCustom) continue;
-    const parts = cat.name.includes(' - ') ? cat.name.split(' - ') : ['Custom', cat.name];
+    if (cat.id === '__household_profiles__') continue;
+    if (cat.id === 'healthcare-oop' || cat.id === 'healthcare-premiums' || cat.id === 'healthcare-irmaa') continue;
+
+    const parts = cat.name.includes(' - ') ? cat.name.split(' - ') : ['Living', cat.name];
     const group = parts[0].trim();
     const name = parts[1] ? parts[1].trim() : cat.name.trim();
     savePlannerExpenseLineItem({
@@ -282,5 +437,20 @@ export async function syncPlannerCatalogToCloudStorage(
     } catch (err) {
       console.warn(`Failed to sync category ${item.name} to cloud:`, err);
     }
+  }
+
+  // Remove any obsolete categories from storage that were deleted from planner catalog
+  try {
+    const existingStorageCats = await adapter.getCategories();
+    const currentCatalogItemIds = new Set(norm.catalog.items.map((i) => i.id));
+    for (const cat of existingStorageCats) {
+      if (cat.id === '__household_profiles__') continue;
+      if (cat.id === 'healthcare-oop' || cat.id === 'healthcare-premiums' || cat.id === 'healthcare-irmaa') continue;
+      if (!currentCatalogItemIds.has(cat.id) && adapter.deleteCategory) {
+        await adapter.deleteCategory(cat.id);
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to clean up deleted categories in storage:', err);
   }
 }

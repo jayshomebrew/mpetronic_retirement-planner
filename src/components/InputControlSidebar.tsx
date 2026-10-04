@@ -1349,6 +1349,13 @@ export const InputControlSidebar: React.FC<InputControlSidebarProps> = ({
           simStartYear={simStartYear}
           detailedExpenses={inputs.detailedExpenses}
           onSave={(expenses) => updateNestedState('detailedExpenses', '', expenses)}
+          youHealthcare={inputs.you.healthcare}
+          wifeHealthcare={inputs.wife.healthcare}
+          isSingleFiler={inputs.isSingleFiler}
+          onNavigateToHealthcare={() => {
+            setShowExpensesDialog(false);
+            setEditingHealthcarePerson('you');
+          }}
         />
       )}
       {editingHealthcarePerson && (

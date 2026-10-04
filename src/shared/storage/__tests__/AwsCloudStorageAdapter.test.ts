@@ -100,4 +100,57 @@ describe('AwsCloudStorageAdapter', () => {
     const pendingAfter = await adapter.getPendingSyncExpenses();
     expect(pendingAfter.length).toBe(0);
   });
+
+  it('updates an existing expense and flushes updates to cloud', async () => {
+    const saved = await adapter.saveExpense({
+      date: '2026-09-10',
+      amount: 50,
+      categoryId: 'cat_groceries',
+      categoryName: 'Groceries',
+      enteredBy: 'Mike',
+    });
+
+    vi.spyOn(AuthService, 'isAuthenticated').mockReturnValue(true);
+    vi.spyOn(AuthService, 'getIdToken').mockResolvedValue('mock_token');
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'success' }),
+    } as unknown as Response);
+
+    const updated = await adapter.updateExpense(saved.expenseId, {
+      amount: 75.25,
+      notes: 'Weekly groceries at Trader Joes',
+    });
+
+    expect(updated.amount).toBe(75.25);
+    expect(updated.notes).toBe('Weekly groceries at Trader Joes');
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('deletes old remote item if date month/year changed during update', async () => {
+    const saved = await adapter.saveExpense({
+      date: '2026-08-25',
+      amount: 30,
+      categoryId: 'cat_fuel',
+      categoryName: 'Fuel',
+      enteredBy: 'Mike',
+    });
+
+    vi.spyOn(AuthService, 'isAuthenticated').mockReturnValue(true);
+    vi.spyOn(AuthService, 'getIdToken').mockResolvedValue('mock_token');
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'success' }),
+    } as unknown as Response);
+
+    await adapter.updateExpense(saved.expenseId, {
+      date: '2026-09-02',
+    });
+
+    // First fetch should be DELETE /api/expenses/{id}
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`/api/expenses/${encodeURIComponent(saved.expenseId)}`),
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
 });
