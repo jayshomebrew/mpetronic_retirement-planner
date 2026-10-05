@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Chart } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -10,208 +10,321 @@ import {
   ChartEvent,
 } from 'chart.js';
 import { SimulationResultRow, AppStateInputs } from '../types';
-import { Coins, Check } from 'lucide-react';
-import { getTargetPresetInfo, CONVERSION_TARGET_PRESETS } from '../engine/taxRates2026';
+import { TrendingUp, Check, Maximize2, Minimize2, ArrowUpDown, Layers } from 'lucide-react';
 
 ChartJS.register(...registerables);
 
 interface BracketMapChartProps {
   ledger: SimulationResultRow[];
   inputs: AppStateInputs;
-  simulateSurvivor: boolean;
-  guidelineOverlay: number | null;
-  setGuidelineOverlay: (val: number | null) => void;
+  simulateSurvivor?: boolean;
 }
 
 export const BracketMapChart: React.FC<BracketMapChartProps> = ({
   ledger,
   inputs,
-  simulateSurvivor,
-  guidelineOverlay,
-  setGuidelineOverlay,
 }) => {
   const chartRef = useRef<ChartJS<'bar' | 'line'> | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
   const [hasHiddenDatasets, setHasHiddenDatasets] = useState(false);
+  const [computedHeight, setComputedHeight] = useState<number>(580);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewMode, setViewMode] = useState<'cashflow' | 'balances'>(() => {
+    try {
+      const saved = window.localStorage.getItem('retirement_planner_chart_view_mode');
+      return saved === 'balances' ? 'balances' : 'cashflow';
+    } catch {
+      return 'cashflow';
+    }
+  });
 
-  const years = useMemo(() => ledger.map((r) => r.year), [ledger]);
+  const handleSetViewMode = (mode: 'cashflow' | 'balances') => {
+    setViewMode(mode);
+    setHasHiddenDatasets(false);
+    try {
+      window.localStorage.setItem('retirement_planner_chart_view_mode', mode);
+    } catch {
+      // ignore
+    }
+  };
 
-  // Extract stack components
+  // Automatically detect screen and viewport height to maximize chart display
+  useEffect(() => {
+    const updateHeight = () => {
+      if (typeof window === 'undefined') return;
+
+      if (isFullscreen) {
+        const headerH = headerRef.current?.offsetHeight || 60;
+        const availableFs = window.innerHeight - headerH - 52;
+        setComputedHeight(Math.max(450, Math.floor(availableFs)));
+        return;
+      }
+
+      if (!panelRef.current) return;
+      const rect = panelRef.current.getBoundingClientRect();
+      const headerH = headerRef.current?.offsetHeight || 60;
+      // 24px bottom buffer + 32px padding/margins
+      const available = window.innerHeight - rect.top - headerH - 56;
+      setComputedHeight(Math.max(450, Math.floor(available)));
+    };
+
+    updateHeight();
+    window.addEventListener('resize', updateHeight);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        updateHeight();
+      });
+
+      if (panelRef.current?.parentElement) {
+        observer.observe(panelRef.current.parentElement);
+      }
+      if (document.body) {
+        observer.observe(document.body);
+      }
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateHeight);
+      if (observer) observer.disconnect();
+    };
+  }, [isFullscreen]);
+
+  // Handle ESC key to exit fullscreen mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
+
+  // Trigger chart resize when computed height updates
+  useEffect(() => {
+    if (chartRef.current) {
+      chartRef.current.resize();
+    }
+  }, [computedHeight]);
+
+  // Extract cash flow components
   const ssIncomes = useMemo(() => ledger.map((r) => r.yourSS + r.wifeSS), [ledger]);
   const rmds = useMemo(() => ledger.map((r) => r.yourRMD + r.wifeRMD), [ledger]);
-  const rothConversions = useMemo(() => ledger.map((r) => r.intentionalRothConversion), [ledger]);
   const activeSalaries = useMemo(() => ledger.map((r) => (r.yourSalary || 0) + (r.wifeSalary || 0)), [ledger]);
 
-  // Dynamic selected quick-fill guideline line calculator
-  const quickFillLineData = useMemo(() => {
-    // If no guideline is selected from the dropdown, do not draw a guideline line
-    if (!guidelineOverlay) return null;
-
-    const activeTarget = guidelineOverlay;
-    const preset = getTargetPresetInfo(activeTarget);
-    const isBracketTarget = preset?.type === 'bracket';
-    const label = preset ? preset.description : `Target Limit ($${activeTarget.toLocaleString()})`;
-    const color = preset ? preset.color : 'rgba(14, 165, 233, 0.9)';
-    const jointBase = preset ? preset.jointBase : activeTarget;
-    const singleBase = preset ? preset.singleBase : activeTarget / 2;
-
-    const parseBirthYear = (dateStr: string | undefined, fallback: number): number => {
-      if (!dateStr) return fallback;
-      const match = dateStr.match(/^(\d{4})/);
-      if (match) {
-        const parsed = parseInt(match[1], 10);
-        if (!isNaN(parsed) && parsed > 1900 && parsed < 2100) {
-          return parsed;
-        }
-      }
-      return fallback;
-    };
-    const yourBirthYear = parseBirthYear(inputs.you.birthDate, 1960);
-    const deathYear = yourBirthYear + (inputs.you.longevityAge ?? 85);
-
-    const dataPoints = ledger.map((r) => {
-      const isSingle = simulateSurvivor && r.year >= deathYear;
-      const baseVal = isSingle ? singleBase : jointBase;
-      const cpiFactor = r.cpiFactor;
-      if (isBracketTarget) {
-        // Federal Bracket: plots Gross AGI equivalent = (Bracket Limit * CPI) + Standard Deduction
-        return (baseVal * cpiFactor) + (r.standardDeduction || 0);
-      }
-      return baseVal * cpiFactor;
-    });
-
-    return { label, color, data: dataPoints };
-  }, [guidelineOverlay, ledger, simulateSurvivor, inputs]);
+  // Extract account balance components
+  const cashBalances = useMemo(() => ledger.map((r) => r.endYourCash + r.endWifeCash), [ledger]);
+  const taxableBalances = useMemo(() => ledger.map((r) => r.endYourTaxableBrokerage + r.endWifeTaxableBrokerage), [ledger]);
+  const preTaxBalances = useMemo(() => ledger.map((r) => r.endYourPreTaxIRA + r.endWifePreTaxIRA), [ledger]);
+  const rothBalances = useMemo(() => ledger.map((r) => r.endYourRothIRA + r.endWifeRothIRA), [ledger]);
 
   const chartData = useMemo(() => {
     const isDataPresent = (data: number[]) => data.some((v) => Math.abs(v) > 0.01);
 
-    const taxableDraws = ledger.map((r) => r.drawdownTaxable);
-    const preTaxDraws = ledger.map((r) => r.drawdownPreTax);
-    const rothDraws = ledger.map((r) => r.drawdownRoth);
-    const cashDraws = ledger.map((r) => r.drawdownCash);
+    let rawDatasets: unknown[];
 
-    const rawDatasets = [
-      isDataPresent(rothConversions) && {
-        label: 'Roth Conversions',
-        data: rothConversions,
-        backgroundColor: 'rgba(6, 95, 70, 0.95)', // deeper dark emerald green (emerald-800)
-        stack: 'income',
-        order: 1,
-        pointStyle: 'rect',
-      },
-      isDataPresent(ssIncomes) && {
-        label: 'Social Security',
-        data: ssIncomes,
-        backgroundColor: 'rgba(59, 130, 246, 0.65)', // blue-500 @ 65% opacity
-        stack: 'income',
-        order: 2,
-        pointStyle: 'rect',
-      },
-      isDataPresent(activeSalaries) && {
-        label: 'Active Salaries',
-        data: activeSalaries,
-        backgroundColor: 'rgba(139, 92, 246, 0.65)', // violet-500 @ 65% opacity
-        stack: 'income',
-        order: 3,
-        pointStyle: 'rect',
-      },
-      isDataPresent(rmds) && {
-        label: 'Forced RMDs',
-        data: rmds,
-        backgroundColor: 'rgba(245, 158, 11, 0.65)', // amber-500 @ 65% opacity
-        stack: 'income',
-        order: 4,
-        pointStyle: 'rect',
-      },
-      isDataPresent(taxableDraws) && {
-        label: 'Taxable Draws',
-        data: taxableDraws,
-        backgroundColor: 'rgba(185, 28, 28, 0.95)', // deeper dark red (red-700 @ 95% opacity)
-        stack: 'income',
-        order: 5,
-        pointStyle: 'rect',
-      },
-      isDataPresent(preTaxDraws) && {
-        label: 'Pre-Tax Draws',
-        data: preTaxDraws,
-        backgroundColor: 'rgba(217, 70, 239, 0.7)', // fuchsia-500 representing IRA ordinary income liquidations
-        stack: 'income',
-        order: 6,
-        pointStyle: 'rect',
-      },
-      isDataPresent(rothDraws) && {
-        label: 'Roth Draws (Tax-Free)',
-        data: rothDraws,
-        backgroundColor: 'rgba(52, 211, 153, 0.75)', // emerald-400 representing tax-free Roth draws
-        stack: 'income', // stacked with all other cash flows in a single bar
-        order: 7,
-        pointStyle: 'rect',
-      },
-      isDataPresent(cashDraws) && {
-        label: 'Cash Draws',
-        data: cashDraws,
-        backgroundColor: 'rgba(194, 65, 12, 0.85)', // dark orange (orange-700)
-        stack: 'income',
-        order: 8,
-        pointStyle: 'rect',
-      },
-      // BOLD Line for Portfolio Value at all times on secondary Y-axis
-      {
-        label: 'Total Net Estate (Portfolio)',
-        data: ledger.map((r) => r.totalPortfolioValue),
-        type: 'line' as const,
-        borderColor: '#10b981', // emerald-500
-        borderWidth: 3,
-        pointRadius: 2,
-        pointHoverRadius: 4,
-        fill: false,
-        yAxisID: 'yPortfolio',
-        order: -1,
-        pointStyle: 'circle',
-        stack: 'line-portfolio',
-      },
-      // BOLD Line for Base Living Expenses on primary Y-axis
-      {
-        label: 'Base Living Expenses',
-        data: ledger.map((r) => r.livingExpenses),
-        type: 'line' as const,
-        borderColor: '#f43f5e', // rose-500 representing expenses/outflows
-        borderWidth: 3,
-        pointRadius: 2,
-        pointHoverRadius: 4,
-        fill: false,
-        yAxisID: 'y',
-        order: -2,
-        pointStyle: 'triangle',
-        stack: 'line-expenses',
-      }
-    ];
+    if (viewMode === 'balances') {
+      rawDatasets = [
+        isDataPresent(cashBalances) && {
+          label: 'Cash Reserves',
+          data: cashBalances,
+          backgroundColor: 'rgba(56, 189, 248, 0.85)', // sky-400 @ 85%
+          borderColor: '#38bdf8',
+          borderWidth: 1,
+          stack: 'balances',
+          order: 4,
+          pointStyle: 'rect',
+        },
+        isDataPresent(taxableBalances) && {
+          label: 'Taxable Brokerage',
+          data: taxableBalances,
+          backgroundColor: 'rgba(59, 130, 246, 0.85)', // blue-500 @ 85%
+          borderColor: '#3b82f6',
+          borderWidth: 1,
+          stack: 'balances',
+          order: 3,
+          pointStyle: 'rect',
+        },
+        isDataPresent(preTaxBalances) && {
+          label: 'Pre-Tax (Traditional IRA/401k)',
+          data: preTaxBalances,
+          backgroundColor: 'rgba(245, 158, 11, 0.85)', // amber-500 @ 85%
+          borderColor: '#f59e0b',
+          borderWidth: 1,
+          stack: 'balances',
+          order: 2,
+          pointStyle: 'rect',
+        },
+        isDataPresent(rothBalances) && {
+          label: 'Roth IRA (Tax-Free)',
+          data: rothBalances,
+          backgroundColor: 'rgba(16, 185, 129, 0.85)', // emerald-500 @ 85%
+          borderColor: '#10b981',
+          borderWidth: 1,
+          stack: 'balances',
+          order: 1,
+          pointStyle: 'rect',
+        },
+        // BOLD Line for Total Net Estate overlay on top of stacked account bars
+        {
+          label: 'Total Net Estate (Portfolio)',
+          data: ledger.map((r) => r.totalPortfolioValue),
+          type: 'line' as const,
+          borderColor: '#ffffff', // crisp white
+          borderWidth: 3,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          fill: false,
+          yAxisID: 'y',
+          order: -1,
+          pointStyle: 'circle',
+          stack: 'line-estate',
+        },
+      ];
+    } else {
+      const taxableDraws = ledger.map((r) => r.drawdownTaxable);
+      const preTaxDraws = ledger.map((r) => r.drawdownPreTax);
+      const rothDraws = ledger.map((r) => r.drawdownRoth);
+      const cashDraws = ledger.map((r) => r.drawdownCash);
+
+      rawDatasets = [
+        isDataPresent(activeSalaries) && {
+          label: 'Active Salaries',
+          data: activeSalaries,
+          backgroundColor: 'rgba(139, 92, 246, 0.75)', // violet-500 @ 75% opacity
+          borderColor: '#8b5cf6',
+          borderWidth: 1,
+          stack: 'income',
+          order: 2,
+          pointStyle: 'rect',
+        },
+        isDataPresent(ssIncomes) && {
+          label: 'Social Security',
+          data: ssIncomes,
+          backgroundColor: 'rgba(59, 130, 246, 0.75)', // blue-500 @ 75% opacity
+          borderColor: '#3b82f6',
+          borderWidth: 1,
+          stack: 'income',
+          order: 3,
+          pointStyle: 'rect',
+        },
+        isDataPresent(rmds) && {
+          label: 'Forced RMDs',
+          data: rmds,
+          backgroundColor: 'rgba(245, 158, 11, 0.75)', // amber-500 @ 75% opacity
+          borderColor: '#f59e0b',
+          borderWidth: 1,
+          stack: 'income',
+          order: 4,
+          pointStyle: 'rect',
+        },
+        isDataPresent(preTaxDraws) && {
+          label: 'Pre-Tax IRA Draws',
+          data: preTaxDraws,
+          backgroundColor: 'rgba(217, 70, 239, 0.75)', // fuchsia-500 representing IRA ordinary income draws
+          borderColor: '#d946ef',
+          borderWidth: 1,
+          stack: 'income',
+          order: 5,
+          pointStyle: 'rect',
+        },
+        isDataPresent(taxableDraws) && {
+          label: 'Taxable Brokerage Draws',
+          data: taxableDraws,
+          backgroundColor: 'rgba(244, 63, 94, 0.80)', // rose-500 representing taxable brokerage liquidation
+          borderColor: '#f43f5e',
+          borderWidth: 1,
+          stack: 'income',
+          order: 6,
+          pointStyle: 'rect',
+        },
+        isDataPresent(rothDraws) && {
+          label: 'Roth Draws (Tax-Free)',
+          data: rothDraws,
+          backgroundColor: 'rgba(52, 211, 153, 0.85)', // emerald-400 representing tax-free Roth draws
+          borderColor: '#34d399',
+          borderWidth: 1,
+          stack: 'income',
+          order: 7,
+          pointStyle: 'rect',
+        },
+        isDataPresent(cashDraws) && {
+          label: 'Cash Draws',
+          data: cashDraws,
+          backgroundColor: 'rgba(249, 115, 22, 0.85)', // dark orange (orange-500)
+          borderColor: '#f97316',
+          borderWidth: 1,
+          stack: 'income',
+          order: 8,
+          pointStyle: 'rect',
+        },
+        // BOLD Line for Portfolio Value at all times on secondary Y-axis
+        {
+          label: 'Total Net Estate (Portfolio)',
+          data: ledger.map((r) => r.totalPortfolioValue),
+          type: 'line' as const,
+          borderColor: '#10b981', // emerald-500
+          borderWidth: 3,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          fill: false,
+          yAxisID: 'yPortfolio',
+          order: -1,
+          pointStyle: 'circle',
+          stack: 'line-portfolio',
+        },
+        // BOLD Line for Base Living Expenses on primary Y-axis
+        {
+          label: 'Base Living Expenses',
+          data: ledger.map((r) => r.livingExpenses),
+          type: 'line' as const,
+          borderColor: '#fb7185', // rose-400 representing expenses/outflows
+          borderWidth: 3,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          fill: false,
+          yAxisID: 'y',
+          order: -2,
+          pointStyle: 'triangle',
+          stack: 'line-expenses',
+        },
+      ];
+    }
 
     const datasets = rawDatasets.filter(Boolean) as ChartData<'bar' | 'line'>['datasets'];
 
-    // If a quick-fill is selected, show only the line related to it
-    if (quickFillLineData) {
-      datasets.push({
-        label: quickFillLineData.label,
-        data: quickFillLineData.data,
-        type: 'line' as const,
-        borderColor: quickFillLineData.color,
-        borderWidth: 2.5,
-        borderDash: [5, 5],
-        pointRadius: 0,
-        fill: false,
-        yAxisID: 'y',
-        order: 0,
-        pointStyle: 'line',
-        stack: 'line-quickfill',
-      });
-    }
+    const primaryLongevity = inputs.you.longevityAge ?? 85;
+    const spouseLongevity = inputs.wife?.longevityAge ?? 95;
+
+    const labels = ledger.map((r) => {
+      const isSingle = inputs.isSingleFiler || !r.wifeAge || r.wifeAge === 0;
+      const primaryAgeStr = r.yourAge >= primaryLongevity ? '-' : String(r.yourAge);
+      const spouseAgeStr = r.wifeAge >= spouseLongevity ? '-' : String(r.wifeAge);
+      const ageLabel = isSingle ? `(${primaryAgeStr})` : `(${primaryAgeStr}/${spouseAgeStr})`;
+      return [String(r.year), ageLabel];
+    });
 
     return {
-      labels: years.map(String),
+      labels,
       datasets,
     };
-  }, [years, activeSalaries, ssIncomes, rmds, rothConversions, ledger, quickFillLineData]);
+  }, [
+    ledger,
+    inputs.isSingleFiler,
+    inputs.you.longevityAge,
+    inputs.wife?.longevityAge,
+    viewMode,
+    activeSalaries,
+    ssIncomes,
+    rmds,
+    cashBalances,
+    taxableBalances,
+    preTaxBalances,
+    rothBalances,
+  ]);
 
   const chartOptions: ChartOptions<'bar' | 'line'> = useMemo(() => {
     return {
@@ -290,46 +403,93 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
             label: function (context: TooltipItem<'bar' | 'line'>) {
               let label = context.dataset.label || '';
               const row = ledger[context.dataIndex];
-              
-              if (row) {
-                const youName = inputs.you.name || 'You';
-                const wifeName = inputs.wife.name || 'Spouse';
-                const fmt = (v: number) => new Intl.NumberFormat('en-US', {
-                  style: 'currency',
-                  currency: 'USD',
-                  maximumFractionDigits: 0,
-                }).format(v);
+              const fmt = (v: number) => new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                maximumFractionDigits: 0,
+              }).format(v);
 
-                if (context.dataset.label === 'Active Salaries') {
-                  const yourSal = row.yourSalary || 0;
-                  const wifeSal = row.wifeSalary || 0;
-                  if (yourSal > 0 && wifeSal > 0) {
-                    label = `Active Salaries (${youName}: ${fmt(yourSal)}, ${wifeName}: ${fmt(wifeSal)})`;
-                  } else if (yourSal > 0) {
-                    label = `Active Salaries (${youName})`;
-                  } else if (wifeSal > 0) {
-                    label = `Active Salaries (${wifeName})`;
+              if (!row) return label;
+
+              const youName = inputs.you.name || 'Primary';
+              const wifeName = inputs.wife?.name || 'Spouse';
+              const isSingle = inputs.isSingleFiler || !row.wifeAge || row.wifeAge === 0;
+
+              if (viewMode === 'balances') {
+                const val = context.parsed.y || 0;
+                if (context.dataset.label === 'Cash Reserves') {
+                  const yourAmt = row.endYourCash || 0;
+                  const wifeAmt = row.endWifeCash || 0;
+                  const spousalBreakdown = !isSingle && (yourAmt > 0 || wifeAmt > 0)
+                    ? ` (${youName}: ${fmt(yourAmt)}, ${wifeName}: ${fmt(wifeAmt)})`
+                    : '';
+                  return `Cash Reserves (Taxable Acct - Cash / Money Market): ${fmt(val)}${spousalBreakdown}`;
+                }
+
+                if (context.dataset.label === 'Taxable Brokerage') {
+                  const yourAmt = row.endYourTaxableBrokerage || 0;
+                  const wifeAmt = row.endWifeTaxableBrokerage || 0;
+                  const spousalBreakdown = !isSingle && (yourAmt > 0 || wifeAmt > 0)
+                    ? ` (${youName}: ${fmt(yourAmt)}, ${wifeName}: ${fmt(wifeAmt)})`
+                    : '';
+                  return `Taxable Brokerage (Taxable Acct - Invested Market Funds): ${fmt(val)}${spousalBreakdown}`;
+                }
+
+                if (context.dataset.label?.includes('Pre-Tax')) {
+                  const yourAmt = row.endYourPreTaxIRA || 0;
+                  const wifeAmt = row.endWifePreTaxIRA || 0;
+                  if (!isSingle && (yourAmt > 0 || wifeAmt > 0)) {
+                    return `Pre-Tax IRAs: ${fmt(val)} (${youName}: ${fmt(yourAmt)}, ${wifeName}: ${fmt(wifeAmt)})`;
                   }
-                } else if (context.dataset.label === 'Social Security') {
-                  const yourSS = row.yourSS || 0;
-                  const wifeSS = row.wifeSS || 0;
-                  if (yourSS > 0 && wifeSS > 0) {
-                    label = `Social Security (${youName}: ${fmt(yourSS)}, ${wifeName}: ${fmt(wifeSS)})`;
-                  } else if (yourSS > 0) {
-                    label = `Social Security (${youName})`;
-                  } else if (wifeSS > 0) {
-                    label = `Social Security (${wifeName})`;
+                  return `Pre-Tax IRAs: ${fmt(val)}`;
+                }
+
+                if (context.dataset.label?.includes('Roth')) {
+                  const yourAmt = row.endYourRothIRA || 0;
+                  const wifeAmt = row.endWifeRothIRA || 0;
+                  if (!isSingle && (yourAmt > 0 || wifeAmt > 0)) {
+                    return `Roth IRAs: ${fmt(val)} (${youName}: ${fmt(yourAmt)}, ${wifeName}: ${fmt(wifeAmt)})`;
                   }
-                } else if (context.dataset.label === 'Forced RMDs') {
-                  const yourRMD = row.yourRMD || 0;
-                  const wifeRMD = row.wifeRMD || 0;
-                  if (yourRMD > 0 && wifeRMD > 0) {
-                    label = `Forced RMDs (${youName}: ${fmt(yourRMD)}, ${wifeName}: ${fmt(wifeRMD)})`;
-                  } else if (yourRMD > 0) {
-                    label = `Forced RMDs (${youName})`;
-                  } else if (wifeRMD > 0) {
-                    label = `Forced RMDs (${wifeName})`;
-                  }
+                  return `Roth IRAs: ${fmt(val)}`;
+                }
+
+                if (context.dataset.label?.includes('Total Net Estate')) {
+                  return `Total Net Estate: ${fmt(row.totalPortfolioValue)}`;
+                }
+
+                return `${label}: ${fmt(val)}`;
+              }
+
+              // Existing Cash Flow callbacks
+              if (context.dataset.label === 'Active Salaries') {
+                const yourSal = row.yourSalary || 0;
+                const wifeSal = row.wifeSalary || 0;
+                if (yourSal > 0 && wifeSal > 0) {
+                  label = `Active Salaries (${youName}: ${fmt(yourSal)}, ${wifeName}: ${fmt(wifeSal)})`;
+                } else if (yourSal > 0) {
+                  label = `Active Salaries (${youName})`;
+                } else if (wifeSal > 0) {
+                  label = `Active Salaries (${wifeName})`;
+                }
+              } else if (context.dataset.label === 'Social Security') {
+                const yourSS = row.yourSS || 0;
+                const wifeSS = row.wifeSS || 0;
+                if (yourSS > 0 && wifeSS > 0) {
+                  label = `Social Security (${youName}: ${fmt(yourSS)}, ${wifeName}: ${fmt(wifeSS)})`;
+                } else if (yourSS > 0) {
+                  label = `Social Security (${youName})`;
+                } else if (wifeSS > 0) {
+                  label = `Social Security (${wifeName})`;
+                }
+              } else if (context.dataset.label === 'Forced RMDs') {
+                const yourRMD = row.yourRMD || 0;
+                const wifeRMD = row.wifeRMD || 0;
+                if (yourRMD > 0 && wifeRMD > 0) {
+                  label = `Forced RMDs (${youName}: ${fmt(yourRMD)}, ${wifeName}: ${fmt(wifeRMD)})`;
+                } else if (yourRMD > 0) {
+                  label = `Forced RMDs (${youName})`;
+                } else if (wifeRMD > 0) {
+                  label = `Forced RMDs (${wifeName})`;
                 }
               }
               
@@ -337,15 +497,39 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
                 label += ': ';
               }
               if (context.parsed.y !== null) {
-                label += new Intl.NumberFormat('en-US', {
-                  style: 'currency',
-                  currency: 'USD',
-                  maximumFractionDigits: 0,
-                }).format(context.parsed.y);
+                label += fmt(context.parsed.y);
               }
               return label;
             },
             footer: function (tooltipItems: TooltipItem<'bar' | 'line'>[]) {
+              const fmt = (v: number) => new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                maximumFractionDigits: 0,
+              }).format(v);
+
+              if (viewMode === 'balances') {
+                const row = ledger[tooltipItems[0]?.dataIndex];
+                if (row) {
+                  const totalVal = row.totalPortfolioValue || 0;
+                  const cashVal = (row.endYourCash || 0) + (row.endWifeCash || 0);
+                  const taxableInvestedVal = (row.endYourTaxableBrokerage || 0) + (row.endWifeTaxableBrokerage || 0);
+                  const totalTaxableAcctVal = cashVal + taxableInvestedVal;
+
+                  const lines: string[] = [];
+                  lines.push(`\nCombined Taxable Account: ${fmt(totalTaxableAcctVal)} (${fmt(taxableInvestedVal)} invested funds + ${fmt(cashVal)} cash reserves)`);
+
+                  if (totalVal > 0) {
+                    const rothPct = Math.round(((row.endYourRothIRA + row.endWifeRothIRA) / totalVal) * 100);
+                    const preTaxPct = Math.round(((row.endYourPreTaxIRA + row.endWifePreTaxIRA) / totalVal) * 100);
+                    const taxableCashPct = Math.max(0, 100 - rothPct - preTaxPct);
+                    lines.push(`Total Net Estate: ${fmt(totalVal)} (${rothPct}% Roth • ${preTaxPct}% Pre-Tax • ${taxableCashPct}% Taxable Acct)`);
+                  }
+                  return lines.join('\n');
+                }
+                return '';
+              }
+
               let sum = 0;
               tooltipItems.forEach((item) => {
                 if (item.dataset.stack === 'income') {
@@ -353,11 +537,7 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
                 }
               });
               if (sum > 0) {
-                return '\nTotal Inflows & Draws: ' + new Intl.NumberFormat('en-US', {
-                  style: 'currency',
-                  currency: 'USD',
-                  maximumFractionDigits: 0,
-                }).format(sum);
+                return '\nTotal Annual Cash Inflows & Draws: ' + fmt(sum);
               }
               return '';
             },
@@ -388,12 +568,19 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
               size: 10,
             },
             callback: function (value: string | number) {
+              const num = Number(value);
+              if (viewMode === 'balances') {
+                if (Math.abs(num) >= 1000000) {
+                  return '$' + (num / 1000000).toFixed(1) + 'M';
+                }
+                return '$' + Math.round(num / 1000) + 'k';
+              }
               return '$' + (Number(value) / 1000) + 'k';
             },
           },
           title: {
             display: true,
-            text: 'Annual Cash Flow / Tax Brackets',
+            text: viewMode === 'balances' ? 'Ending Account Balances ($)' : 'Annual Cash Inflows & Draws',
             color: '#94a3b8',
             font: { size: 10, weight: 'bold' }
           }
@@ -401,8 +588,9 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
         yPortfolio: {
           type: 'linear' as const,
           position: 'right' as const,
+          display: viewMode === 'cashflow',
           grid: {
-            drawOnChartArea: false, // don't draw gridlines from this scale on main area
+            drawOnChartArea: false,
           },
           ticks: {
             color: '#10b981',
@@ -414,7 +602,7 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
             },
           },
           title: {
-            display: true,
+            display: viewMode === 'cashflow',
             text: 'Portfolio Net Estate',
             color: '#10b981',
             font: { size: 10, weight: 'bold' }
@@ -422,75 +610,110 @@ export const BracketMapChart: React.FC<BracketMapChartProps> = ({
         }
       },
     };
-  }, [ledger, inputs]);
+  }, [ledger, inputs, viewMode]);
 
   return (
-    <div className="glass-panel rounded-2xl p-3.5 space-y-3">
+    <div
+      ref={panelRef}
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-50 p-4 md:p-6 bg-slate-950 flex flex-col overflow-hidden animate-in fade-in duration-150'
+          : 'glass-panel rounded-2xl p-3.5 space-y-3 flex flex-col w-full'
+      }
+    >
       {/* Header Info */}
-      <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+      <div
+        ref={headerRef}
+        className="flex flex-col md:flex-row md:justify-between md:items-center gap-3 shrink-0"
+      >
         <div>
           <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-            <Coins className="w-5 h-5 text-emerald-400" />
-            Interactive Tax and IRMAA Bracket Map
+            <TrendingUp className="w-5 h-5 text-emerald-400" />
+            Lifetime Cash Flow &amp; Estate Trajectory
           </h3>
           <p className="text-xs text-slate-400">
-            Compare annual gross income streams against Federal brackets and Medicare IRMAA surcharge cliffs.
+            {viewMode === 'cashflow'
+              ? 'Visualize annual cash inflows and account drawdowns funding your living expenses alongside long-term portfolio growth.'
+              : 'Track the evolution of Taxable, Pre-Tax, and Roth account balances over time showing the impact of Roth conversions and drawdowns.'}
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-4">
-          {/* Visual Guideline Overlay Selector */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Guideline Overlay:</span>
-            <select
-              value={guidelineOverlay !== null ? guidelineOverlay : ""}
-              onChange={(e) => {
-                const val = e.target.value;
-                const valNum = val === "" ? null : Number(val);
-                setGuidelineOverlay(valNum);
-              }}
-              className="text-xs font-semibold px-3 py-2 bg-slate-900 text-slate-100 border border-slate-800 rounded-xl hover:border-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all cursor-pointer"
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {/* View Mode Toggle Pill */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+            <button
+              type="button"
+              onClick={() => handleSetViewMode('cashflow')}
+              className={`text-xs px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === 'cashflow'
+                  ? 'bg-emerald-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="View annual cash inflows, social security, salaries, and account drawdowns"
             >
-              <option value="">No Active Guideline</option>
-              <optgroup label="Federal Tax Brackets (MFJ)">
-                {CONVERSION_TARGET_PRESETS.filter((p) => p.type === 'bracket').map((p) => (
-                  <option key={p.id} value={p.targetValue}>
-                    {p.description}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Medicare IRMAA Cliffs">
-                {CONVERSION_TARGET_PRESETS.filter((p) => p.type === 'irmaa').map((p) => (
-                  <option key={p.id} value={p.targetValue}>
-                    {p.description}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-            {hasHiddenDatasets && (
-              <button
-                onClick={() => {
-                  if (chartRef.current) {
-                    const chart = chartRef.current;
-                    chart.data.datasets.forEach((_, i: number) => {
-                      chart.setDatasetVisibility(i, true);
-                    });
-                    chart.update();
-                    setHasHiddenDatasets(false);
-                  }
-                }}
-                className="text-xs font-semibold px-3 py-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 rounded-xl transition-all cursor-pointer flex items-center gap-1.5"
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>Show All Categories</span>
-              </button>
-            )}
+              <ArrowUpDown className="w-3.5 h-3.5" />
+              <span>Cash Flows &amp; Draws</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetViewMode('balances')}
+              className={`text-xs px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === 'balances'
+                  ? 'bg-emerald-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="View stacked account balances over time (Taxable, Pre-Tax IRA, and Roth IRA)"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Stacked Balances</span>
+            </button>
           </div>
+
+          {hasHiddenDatasets && (
+            <button
+              onClick={() => {
+                if (chartRef.current) {
+                  const chart = chartRef.current;
+                  chart.data.datasets.forEach((_, i: number) => {
+                    chart.setDatasetVisibility(i, true);
+                  });
+                  chart.update();
+                  setHasHiddenDatasets(false);
+                }
+              }}
+              className="text-xs font-semibold px-3 py-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 rounded-xl transition-all cursor-pointer flex items-center gap-1.5"
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>Show All Categories</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setIsFullscreen((prev) => !prev)}
+            className="text-xs font-semibold px-2.5 py-1.5 bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-slate-100 border border-slate-700/60 rounded-xl transition-all cursor-pointer flex items-center gap-1.5"
+            title={isFullscreen ? 'Exit Fullscreen (Esc)' : 'Maximize Chart to Fullscreen'}
+          >
+            {isFullscreen ? (
+              <>
+                <Minimize2 className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden sm:inline">Exit Fullscreen</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden sm:inline">Maximize</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 
       {/* Chart Canvas */}
-      <div className="h-[580px] relative bg-slate-950/40 rounded-xl border border-slate-800/40 p-4">
+      <div
+        style={{ height: computedHeight ? `${computedHeight}px` : '580px' }}
+        className="relative bg-slate-950/40 rounded-xl border border-slate-800/40 p-3 sm:p-4 w-full transition-[height] duration-150 shrink-0"
+      >
         <Chart ref={chartRef} type="bar" data={chartData} options={chartOptions} />
       </div>
     </div>

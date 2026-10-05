@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useDeferredValue, useRef } from 'react';
+import { useState, useEffect, useMemo, useDeferredValue, useRef, useCallback } from 'react';
 import {
   AppStateInputs,
   LockedReturnSequence,
@@ -24,6 +24,7 @@ import {
 import { DEFAULT_FILL_TO_TARGET_VALUE } from './engine/taxRates2026';
 import { DashboardLayout } from './components/DashboardLayout';
 import { ActiveViewType } from './components/SidebarNavigation';
+import { useActiveView } from './hooks/useActiveView';
 import { ParametersWorkspace } from './components/ParametersWorkspace';
 import { BracketMapChart } from './components/BracketMapChart';
 import { TaxableIncomeWorkspace } from './components/TaxableIncomeWorkspace';
@@ -261,6 +262,7 @@ function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T | ((val
 
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent | CustomEvent) => {
+      if (e.type === 'retirement_planner_inputs_updated' && key !== 'retirement_planner_inputs') return;
       if ('key' in e && e.key && e.key !== key) return;
       try {
         const item = window.localStorage.getItem(key);
@@ -305,7 +307,7 @@ const TAB_INDEX_TO_VIEW: Record<number, ActiveViewType> = {
 function App() {
   const [inputs, setInputs] = useLocalStorage<AppStateInputs>('retirement_planner_inputs', DEFAULT_INPUTS);
   const [demoInputs, setDemoInputs] = useState<AppStateInputs>(() => JSON.parse(JSON.stringify(SAMPLE_DEMO_PLAN)));
-  const [activeView, setActiveView] = useLocalStorage<ActiveViewType>('retirement_planner_active_view', 'overview');
+  const [activeView, setActiveView] = useActiveView('overview');
   const [simulateSurvivor, setSimulateSurvivor] = useLocalStorage<boolean>('retirement_planner_survivor', false);
   const [savedPlans, setSavedPlans] = useLocalStorage<SavedPlan[]>('retirement_planner_saved_plans', []);
   const [useTodayDollars, setUseTodayDollars] = useLocalStorage<boolean>('retirement_planner_use_today_dollars', false);
@@ -435,24 +437,25 @@ function App() {
     }
   };
 
-  // Synchronize inputs while seamlessly restoring simulateSurvivor and savedPlans if present in imported/loaded plan
+  // Dedicated handler to keep simulateSurvivor state and inputs.simulateSurvivor synchronized
+  const handleSetSimulateSurvivor = useCallback(
+    (val: boolean) => {
+      setSimulateSurvivor(val);
+      if (isDemoMode) {
+        setDemoInputs((prev) => ({ ...prev, simulateSurvivor: val }));
+      } else {
+        setInputs((prev) => ({ ...prev, simulateSurvivor: val }));
+      }
+    },
+    [setSimulateSurvivor, setInputs, isDemoMode]
+  );
+
+  // Synchronize inputs without clobbering active simulateSurvivor state on incremental edits
   const handleInputsChange = (newInputs: AppStateInputs | ((prev: AppStateInputs) => AppStateInputs)) => {
     if (isDemoMode) {
       if (typeof newInputs === 'function') {
-        setDemoInputs((prev) => {
-          const next = newInputs(prev);
-          if (typeof next.simulateSurvivor === 'boolean') {
-            setSimulateSurvivor(next.simulateSurvivor);
-          }
-          if (Array.isArray((next as { savedPlans?: SavedPlan[] }).savedPlans)) {
-            setSavedPlans((next as { savedPlans?: SavedPlan[] }).savedPlans!);
-          }
-          return next;
-        });
+        setDemoInputs((prev) => newInputs(prev));
       } else {
-        if (typeof newInputs.simulateSurvivor === 'boolean') {
-          setSimulateSurvivor(newInputs.simulateSurvivor);
-        }
         if (Array.isArray((newInputs as { savedPlans?: SavedPlan[] }).savedPlans)) {
           setSavedPlans((newInputs as { savedPlans?: SavedPlan[] }).savedPlans!);
         }
@@ -462,25 +465,21 @@ function App() {
     }
 
     if (typeof newInputs === 'function') {
-      setInputs((prev) => {
-        const next = newInputs(prev);
-        if (typeof next.simulateSurvivor === 'boolean') {
-          setSimulateSurvivor(next.simulateSurvivor);
-        }
-        if (Array.isArray((next as { savedPlans?: SavedPlan[] }).savedPlans)) {
-          setSavedPlans((next as { savedPlans?: SavedPlan[] }).savedPlans!);
-        }
-        return next;
-      });
+      setInputs((prev) => newInputs(prev));
     } else {
-      if (typeof newInputs.simulateSurvivor === 'boolean') {
-        setSimulateSurvivor(newInputs.simulateSurvivor);
-      }
       if (Array.isArray((newInputs as { savedPlans?: SavedPlan[] }).savedPlans)) {
         setSavedPlans((newInputs as { savedPlans?: SavedPlan[] }).savedPlans!);
       }
       setInputs(newInputs);
     }
+  };
+
+  // Full plan loader for restoring plans from Plan Comparison
+  const handleLoadPlan = (loadedInputs: AppStateInputs) => {
+    if (typeof loadedInputs.simulateSurvivor === 'boolean') {
+      handleSetSimulateSurvivor(loadedInputs.simulateSurvivor);
+    }
+    handleInputsChange(loadedInputs);
   };
 
   // Global focus auto-select: automatically select text on number/text inputs so typing replaces default/0 values immediately
@@ -551,12 +550,6 @@ function App() {
   // Persisted Quick Fill selection for Workspace 2 Roth optimization
   const [selectedQuickFill, setSelectedQuickFill] = useLocalStorage<number | null>(
     'retirement_planner_selected_quick_fill',
-    null
-  );
-
-  // Dedicated persisted Guideline Overlay selection for Workspace 1 Bracket Map
-  const [chartGuidelineOverlay, setChartGuidelineOverlay] = useLocalStorage<number | null>(
-    'retirement_planner_chart_guideline_overlay',
     null
   );
 
@@ -944,7 +937,7 @@ function App() {
             onChange={handleInputsChange}
             onReset={() => handleInputsChange(DEFAULT_INPUTS)}
             simulateSurvivor={simulateSurvivor}
-            setSimulateSurvivor={setSimulateSurvivor}
+            setSimulateSurvivor={handleSetSimulateSurvivor}
             ledger={displayActiveLedger}
             globalScenario={globalScenario}
             savedPlans={savedPlans}
@@ -952,14 +945,12 @@ function App() {
           />
         )}
 
-        {/* Workspace 1: Overview & Bracket Map */}
+        {/* Workspace 1: Overview & Cash Flow Trajectory */}
         {activeView === 'overview' && (
           <BracketMapChart
             ledger={displayActiveLedger}
             inputs={activeInputs}
             simulateSurvivor={simulateSurvivor}
-            guidelineOverlay={chartGuidelineOverlay}
-            setGuidelineOverlay={setChartGuidelineOverlay}
           />
         )}
 
@@ -1012,7 +1003,7 @@ function App() {
         {activeView === 'compare' && (
           <PlanComparisonWorkspace
             inputs={activeInputs}
-            onLoadPlan={handleInputsChange}
+            onLoadPlan={handleLoadPlan}
             savedPlans={savedPlans}
             onSavePlans={setSavedPlans}
             simulateSurvivor={simulateSurvivor}

@@ -159,14 +159,17 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
       wifeAge = yr - wifeBirthYear || (63 + delta);
     }
 
+    const primaryLongevity = inputs.you.longevityAge ?? 85;
+    const spouseLongevity = inputs.wife?.longevityAge ?? 95;
+    const primaryAgeStr = yourAge >= primaryLongevity ? '-' : String(yourAge);
+    const spouseAgeStr = wifeAge >= spouseLongevity ? '-' : String(wifeAge);
+
     if (inputs.isSingleFiler) {
-      return `${yr} (${yourAge})`;
+      return `${yr} (${primaryAgeStr})`;
     }
 
-    return `${yr} (${yourAge}/${wifeAge})`;
+    return `${yr} (${primaryAgeStr}/${spouseAgeStr})`;
   };
-
-  const years = useMemo(() => ledger.map((r) => r.year), [ledger]);
 
   // Parse birth year for survivor status checks
   const yourBirthYear = useMemo(() => {
@@ -198,21 +201,20 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
       const grossNonConvAGI = Math.max(0, r.fedAGI - rothConv);
       const stdDeduction = r.standardDeduction || 0;
       const netNonConvTaxable = Math.max(0, grossNonConvAGI - stdDeduction);
-
-      // Remaining deduction available after absorbing non-conversion AGI
-      const remainingDeduction = Math.max(0, stdDeduction - grossNonConvAGI);
-      // Taxable portion of Roth conversion (after any remaining deduction)
-      const taxableRothConv = Math.max(0, rothConv - remainingDeduction);
-
-      // Proportionally scale components to sum up to netNonConvTaxable
-      const scale = grossNonConvAGI > 0 ? netNonConvTaxable / grossNonConvAGI : 0;
-      const netSS = taxableSS * scale;
-      const netSalary = taxableSalary * scale;
-      const netRMDsDraws = rmdsAndTradDraws * scale;
-      const netInvestment = investmentIncome * scale;
-      const netOther = otherIncome * scale;
-
       const totalTaxableIncome = r.taxableIncome;
+
+      // Scale all income components proportionally to their share of total gross income,
+      // ensuring the stacked bar components exactly sum up to Total Taxable Income,
+      // preserving visibility of dividends, interest, and capital gains in all years.
+      const totalGrossAGI = taxableSalary + taxableSS + rmdsAndTradDraws + investmentIncome + otherIncome + rothConv;
+      const globalScale = (totalGrossAGI > 0 && totalTaxableIncome > 0) ? (totalTaxableIncome / totalGrossAGI) : 0;
+
+      const netSS = taxableSS * globalScale;
+      const netSalary = taxableSalary * globalScale;
+      const netRMDsDraws = rmdsAndTradDraws * globalScale;
+      const netInvestment = investmentIncome * globalScale;
+      const netOther = otherIncome * globalScale;
+      const taxableRothConv = rothConv * globalScale;
 
       return {
         year: r.year,
@@ -339,11 +341,22 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
 
     const datasets = rawDatasets.filter(Boolean) as ChartData<'bar' | 'line'>['datasets'];
 
+    const primaryLongevity = inputs.you.longevityAge ?? 85;
+    const spouseLongevity = inputs.wife?.longevityAge ?? 95;
+
+    const labels = processedRows.map((r) => {
+      const isSingle = inputs.isSingleFiler || !r.wifeAge || r.wifeAge === 0;
+      const primaryAgeStr = r.yourAge >= primaryLongevity ? '-' : String(r.yourAge);
+      const spouseAgeStr = r.wifeAge >= spouseLongevity ? '-' : String(r.wifeAge);
+      const ageLabel = isSingle ? `(${primaryAgeStr})` : `(${primaryAgeStr}/${spouseAgeStr})`;
+      return [String(r.year), ageLabel];
+    });
+
     return {
-      labels: years,
+      labels,
       datasets,
     };
-  }, [years, processedRows, benchmarkLineData]);
+  }, [processedRows, benchmarkLineData, inputs.isSingleFiler, inputs.you.longevityAge, inputs.wife?.longevityAge]);
 
   // Chart options
   const chartOptions: ChartOptions<'bar' | 'line'> = useMemo(() => {
@@ -427,7 +440,14 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
               if (!items.length) return '';
               const idx = items[0].dataIndex;
               const r = processedRows[idx];
-              return `Year ${r.year} (Ages: You ${r.yourAge} / Spouse ${r.wifeAge})`;
+              const primaryLongevity = inputs.you.longevityAge ?? 85;
+              const spouseLongevity = inputs.wife?.longevityAge ?? 95;
+              const primaryAgeStr = r.yourAge >= primaryLongevity ? '-' : String(r.yourAge);
+              const spouseAgeStr = r.wifeAge >= spouseLongevity ? '-' : String(r.wifeAge);
+              if (inputs.isSingleFiler || !r.wifeAge || r.wifeAge === 0) {
+                return `Year ${r.year} (Age: ${primaryAgeStr})`;
+              }
+              return `Year ${r.year} (Ages: You ${primaryAgeStr} / Spouse ${spouseAgeStr})`;
             },
             label: (context: TooltipItem<'bar' | 'line'>) => {
               const label = context.dataset.label || '';
@@ -441,7 +461,7 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
               const lines = [
                 '-----------------------------------',
                 `Gross Federal AGI: ${formatCurrency(r.grossNonConvAGI + r.rothConv)}`,
-                `Standard Deduction: -${formatCurrency(r.stdDeduction)}`,
+                `Deductions (Std / Itemized): -${formatCurrency(r.stdDeduction)}`,
                 `Net Non-Conv Taxable: ${formatCurrency(r.netNonConvTaxable)}`,
                 `Roth Conversion: +${formatCurrency(r.rothConv)}`,
                 `TOTAL TAXABLE INCOME: ${formatCurrency(r.totalTaxableIncome)}`,
@@ -483,7 +503,7 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
         },
       },
     };
-  }, [processedRows, benchmarkLineData]);
+  }, [processedRows, benchmarkLineData, inputs.isSingleFiler, inputs.you.longevityAge, inputs.wife?.longevityAge]);
 
   // Key KPI summary statistics across conversion window years
   const kpiStats = useMemo(() => {
@@ -1046,7 +1066,9 @@ export const TaxableIncomeWorkspace: React.FC<TaxableIncomeWorkspaceProps> = ({
                   >
                     <td className="py-2 px-3 font-bold text-slate-100">{r.year}</td>
                     <td className="py-2 px-3 text-slate-400">
-                      {r.yourAge} / {r.wifeAge}
+                      {inputs.isSingleFiler 
+                        ? (r.yourAge >= (inputs.you.longevityAge ?? 85) ? '-' : r.yourAge)
+                        : `${r.yourAge >= (inputs.you.longevityAge ?? 85) ? '-' : r.yourAge} / ${r.wifeAge >= (inputs.wife?.longevityAge ?? 95) ? '-' : r.wifeAge}`}
                     </td>
                     <td className="py-2 px-3">{formatCurrency(r.grossNonConvAGI)}</td>
                     <td className="py-2 px-3 text-slate-400">-{formatCurrency(r.stdDeduction)}</td>

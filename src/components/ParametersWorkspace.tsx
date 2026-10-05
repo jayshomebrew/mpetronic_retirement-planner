@@ -742,23 +742,32 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
                 {!inputs.isSingleFiler ? (
                   <div className="p-3.5 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
                     <div className="flex items-center justify-between">
-                      <div>
+                      <label htmlFor="simulateSurvivorToggle" className="cursor-pointer">
                         <span className="text-xs font-semibold text-slate-200 block">Simulate Survivor Scenario</span>
                         <span className="text-[10px] text-slate-400">
                           Stress tests widow's tax penalty if primary spouse passes away first
                         </span>
+                      </label>
+                      <div className="flex items-center gap-2.5">
+                        <input
+                          type="checkbox"
+                          id="simulateSurvivorToggle"
+                          checked={simulateSurvivor}
+                          onChange={(e) => setSimulateSurvivor(e.target.checked)}
+                          className="rounded border-slate-700 text-rose-500 focus:ring-rose-500 h-4 w-4 bg-slate-900 cursor-pointer accent-rose-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setSimulateSurvivor(!simulateSurvivor)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
+                            simulateSurvivor
+                              ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm'
+                              : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {simulateSurvivor ? 'Survivor Active' : 'Off'}
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setSimulateSurvivor(!simulateSurvivor)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
-                          simulateSurvivor
-                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm'
-                            : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
-                        }`}
-                      >
-                        {simulateSurvivor ? 'Survivor Active' : 'Off'}
-                      </button>
                     </div>
                     <p className="text-[10px] text-slate-500 leading-normal">
                       When active, compresses tax brackets to single filer rates and reduces dual Social Security to the single higher benefit upon survivor transition.
