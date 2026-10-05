@@ -334,10 +334,8 @@ export const LookbackLedgerTable: React.FC<LookbackLedgerTableProps> = ({
                       )}
                       <span className="text-[10px] font-normal text-slate-400">
                         {inputs.isSingleFiler 
-                          ? `(${r.yourAge})` 
-                          : (simulateSurvivor && r.year >= deathYear) 
-                            ? `(--/${r.wifeAge})` 
-                            : `(${r.yourAge}/${r.wifeAge})`}
+                          ? `(${r.yourAge >= (inputs.you.longevityAge ?? 85) ? '-' : r.yourAge})` 
+                          : `(${r.yourAge >= (inputs.you.longevityAge ?? 85) ? '-' : r.yourAge}/${r.wifeAge >= (inputs.wife?.longevityAge ?? 95) ? '-' : r.wifeAge})`}
                       </span>
                     </div>
                   </td>

@@ -43,7 +43,7 @@ interface DashboardLayoutProps {
 }
 
 const VIEW_TITLES: Record<ActiveViewType, { title: string; category?: string }> = {
-  overview: { title: 'Overview & Tax Bracket Map', category: 'Workspaces' },
+  overview: { title: 'Overview & Cash Flow Trajectory', category: 'Workspaces' },
   'taxable-income': { title: 'Taxable Income Planner', category: 'Workspaces' },
   'lookback-ledger': { title: '35-Year Lookback Ledger', category: 'Workspaces' },
   'monte-carlo': { title: 'Monte Carlo Stochastic Analysis', category: 'Workspaces' },

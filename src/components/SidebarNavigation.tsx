@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Coins,
   Calculator,
   TableProperties,
   TrendingUp,
@@ -62,8 +61,8 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     id: 'overview',
     label: 'Overview',
     shortLabel: 'Overview',
-    icon: Coins,
-    description: 'Bracket map & tax plan',
+    icon: TrendingUp,
+    description: 'Cash flow & estate trajectory',
   },
   {
     id: 'taxable-income',

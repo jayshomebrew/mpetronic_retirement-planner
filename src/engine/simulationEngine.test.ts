@@ -1579,6 +1579,39 @@ describe('runRetirementSimulation fixes', () => {
         expect(row.magi).toBeLessThanOrEqual(expectedMAGITarget + 0.05);
       }
     });
+
+    it('should fill bracket target accurately when itemized charitable deductions exceed standard deduction', () => {
+      const getMockInputs = (): AppStateInputs => ({
+        you: { birthDate: '1960-01-01', plannedRetirementAge: 65, activeSalary: 0, targetSSClaimingAge: 70, estimatedPIA: 3000 },
+        wife: { birthDate: '1964-01-01', plannedRetirementAge: 61, activeSalary: 0, targetSSClaimingAge: 67, estimatedPIA: 1500 },
+        portfolio: { yourPreTaxIRA: 1500000, yourRothIRA: 50000, yourTaxableBrokerage: 500000, yourTaxableBasis: 500000, yourCash: 200000, wifePreTaxIRA: 0, wifeRothIRA: 0, wifeTaxableBrokerage: 0, wifeTaxableBasis: 0, wifeCash: 0 },
+        jurisdiction: { currentState: 'MD', targetState: 'MD', relocationYear: null },
+        growthAssumptions: { equityReturnRate: 0.06, fixedIncomeReturnRate: 0.04, cpiInflationRate: 0.024, healthcareInflationRate: 0.05 },
+        annualLivingExpenses: 60000,
+        annualRothConversion: 50000,
+        simulationStartYear: 2026,
+        rothConversionStartYear: 2027,
+        rothConversionEndYear: 2029,
+        rothConversionStrategy: 'fill-to-target',
+        rothConversionTargetValue: 211400, // 22% bracket limit ($211,400 Taxable Income)
+        charitySettings: { enabled: true, growthPercentage: 0.1, useQCD: true, minAnnualTithe: 30000, maxAnnualTithe: 50000 },
+        monteCarloSettings: { mode: 'monte-carlo', trials: 10, equityVolatility: 0.15, fixedIncomeVolatility: 0.05, correlation: 0.15, seed: null },
+        isConfigured: true,
+        isSingleFiler: false,
+      });
+
+      const inputs = getMockInputs();
+      const results = runRetirementSimulation(inputs);
+
+      const convRows = results.filter(r => r.year >= 2027 && r.year <= 2029);
+      for (const row of convRows) {
+        const expectedTaxableTarget = 211400 * row.cpiFactor;
+        expect(row.intentionalRothConversion).toBeGreaterThan(0);
+        // Taxable income must reach within 1% of the bracket limit even with high itemized tithes
+        expect(row.taxableIncome).toBeGreaterThan(expectedTaxableTarget * 0.99);
+        expect(row.taxableIncome).toBeLessThanOrEqual(expectedTaxableTarget + 100);
+      }
+    });
   });
 
   describe('solveRothConversionForTargetAGI', () => {

@@ -4,7 +4,6 @@ import {
   Search,
   BookOpen,
   Layers,
-  Coins,
   ShieldAlert,
   Sliders,
   ArrowRightLeft,
@@ -139,12 +138,12 @@ export const DocumentationDialog: React.FC<DocumentationDialogProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-slate-200 group-hover:text-emerald-400 flex items-center gap-1.5">
-                    <Coins className="w-3.5 h-3.5 text-emerald-400" />
+                    <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
                     Workspace 1
                   </span>
                   <ExternalLink className="w-3 h-3 text-slate-500 group-hover:text-emerald-400" />
                 </div>
-                <div className="text-[10px] text-slate-400 mt-1">Overview & Bracket Map</div>
+                <div className="text-[10px] text-slate-400 mt-1">Overview & Cash Flow</div>
               </button>
 
               <button
@@ -225,20 +224,20 @@ export const DocumentationDialog: React.FC<DocumentationDialogProps> = ({
     },
     {
       id: 'workspace-1',
-      title: 'Workspace 1: Strategy & Bracket Map',
+      title: 'Workspace 1: Lifetime Cash Flow & Estate',
       category: 'Workspaces',
-      icon: Coins,
-      badge: 'Visual Strategy',
-      keywords: ['workspace 1', 'bracket map', 'roth conversion', 'quick fill', 'optimizer', 'sankey', 'cash flow', 'tax bracket', 'social security claiming'],
+      icon: TrendingUp,
+      badge: 'Visual Trajectory',
+      keywords: ['workspace 1', 'cash flow', 'net worth', 'drawdowns', 'living expenses', 'portfolio growth', 'trajectory'],
       content: (
         <div className="space-y-6">
           <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl">
             <h3 className="text-sm font-bold text-slate-100 mb-1 flex items-center gap-2">
-              <Coins className="w-4 h-4 text-emerald-400" />
-              Tax Bracket Visualizer & Roth Optimization
+              <TrendingUp className="w-4 h-4 text-emerald-400" />
+              Lifetime Cash Flow & Estate Trajectory
             </h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Workspace 1 is the strategic cockpit for your retirement plan. It illustrates how your annual taxable income and Modified Adjusted Gross Income (MAGI) stack against federal tax brackets and Medicare IRMAA thresholds over your entire 35-year retirement horizon.
+              Workspace 1 visualizes your multi-decade cash flow funding waterfall and long-term estate net worth trajectory. See how annual living expenses are funded across salaries, Social Security, pre-tax withdrawals, and taxable account draws alongside your portfolio balance growth.
             </p>
           </div>
 

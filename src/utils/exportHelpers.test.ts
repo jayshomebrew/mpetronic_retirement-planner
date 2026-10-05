@@ -148,6 +148,14 @@ describe('exportHelpers', () => {
       expect(parsed.simulateSurvivor).toBe(true);
     });
 
+    it('falls back to inputs.simulateSurvivor if explicit argument is undefined', async () => {
+      const inputsWithSurvivor = { ...mockInputs, simulateSurvivor: true };
+      const blob = generateJsonBlob(inputsWithSurvivor);
+      const text = await blob.text();
+      const parsed = JSON.parse(text);
+      expect(parsed.simulateSurvivor).toBe(true);
+    });
+
     it('preserves savedPlans in exported JSON payload', async () => {
       const mockSaved = [
         { id: 'scen-1', name: 'FL Relocation', inputs: mockInputs, createdAt: 'Sep 28, 2026' }
