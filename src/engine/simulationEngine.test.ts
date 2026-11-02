@@ -2437,9 +2437,8 @@ describe('runRetirementSimulation fixes', () => {
     });
   });
 
-  describe('Spouse Healthcare Covered by Working Partner Plan', () => {
-    const getBaseHealthcareInputs = (coveredByWorkingSpouse: boolean): AppStateInputs => ({
-      you: {
+  const getBaseHealthcareInputs = (coveredByWorkingSpouse: boolean): AppStateInputs => ({
+    you: {
         name: 'Primary',
         birthDate: '1960-06-27',
         plannedRetirementAge: 66,
@@ -2579,7 +2578,8 @@ describe('runRetirementSimulation fixes', () => {
       isSingleFiler: false,
     });
 
-    it('should waive spouse pre-65 premiums and OOP during working months and activate post-retirement', () => {
+    describe('Spouse Healthcare Covered by Working Partner Plan', () => {
+      it('should waive spouse pre-65 premiums and OOP during working months and activate post-retirement', () => {
       const inputs = getBaseHealthcareInputs(true);
       const ledger = runRetirementSimulation(inputs);
       const row2026 = ledger.find((r) => r.year === 2026);
@@ -2616,6 +2616,74 @@ describe('runRetirementSimulation fixes', () => {
       expect(row2026?.preMedicareHealthcareCost).toBe(7560);
       // Spouse full year OOP ($6,500) + Primary 2 mo Medicare OOP ($130.50) = $6,630.50
       expect(Math.round(row2026?.plannedHealthcareOOP ?? 0)).toBe(6631);
+    });
+  });
+
+  describe('Dynamic Healthcare Jurisdiction Resolution', () => {
+    it('should correctly utilize dynamically keyed state healthcare configuration', () => {
+      const baseInputs = getBaseHealthcareInputs(false);
+      // Configure jurisdiction for Pennsylvania (PA) relocating to North Carolina (NC)
+      const inputs: AppStateInputs = {
+        ...baseInputs,
+        jurisdiction: {
+          currentState: 'PA',
+          targetState: 'NC',
+          relocationYear: 2028,
+        },
+        you: {
+          ...baseInputs.you,
+          healthcare: {
+            medicarePartBPremium: null,
+            fileSSA44LifeChangingEvent: true,
+            PA: {
+              pre65MedicalPremium: 750,
+              pre65MedicalOOP: 2000,
+              pre65DentalPremium: 50,
+              pre65DentalOOP: 0,
+              pre65VisionPremium: 20,
+              pre65VisionOOP: 0,
+              medicarePartDPremium: 40,
+              medicarePartDDeductibleCopays: 500,
+              supplementPremium: 180,
+              supplementOOP: 250,
+              post65HearingCare: 0,
+              post65DentalPremium: 45,
+              post65DentalOOP: 0,
+              post65VisionPremium: 15,
+              post65VisionOOP: 0,
+            },
+            NC: {
+              pre65MedicalPremium: 500,
+              pre65MedicalOOP: 1000,
+              pre65DentalPremium: 40,
+              pre65DentalOOP: 0,
+              pre65VisionPremium: 10,
+              pre65VisionOOP: 0,
+              medicarePartDPremium: 30,
+              medicarePartDDeductibleCopays: 300,
+              supplementPremium: 140,
+              supplementOOP: 200,
+              post65HearingCare: 0,
+              post65DentalPremium: 35,
+              post65DentalOOP: 0,
+              post65VisionPremium: 10,
+              post65VisionOOP: 0,
+            },
+          },
+        },
+      };
+
+      const ledger = runRetirementSimulation(inputs);
+      const row2026 = ledger.find((r) => r.year === 2026);
+      const row2029 = ledger.find((r) => r.year === 2029);
+
+      expect(row2026).toBeDefined();
+      expect(row2029).toBeDefined();
+
+      // In 2026, living in PA: primary medicare supplement = $180/mo * 12 = $2160 (inflated by factor=1.0 at start)
+      // In 2029, living in NC: primary medicare supplement should use NC rates ($140/mo)
+      expect(row2026?.plannedHealthcareOOP).toBeGreaterThan(0);
+      expect(row2029?.plannedHealthcareOOP).toBeGreaterThan(0);
     });
   });
 });

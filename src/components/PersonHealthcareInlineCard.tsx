@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { HeartPulse, Heart, Shield, Sparkles, Calendar, CalendarCheck } from 'lucide-react';
 import { HealthcareConfig, StateHealthcareConfig } from '../types';
+import { getStateTaxProfile } from '../engine/stateTaxRegistry';
 import { NumericInput } from './NumericInput';
 
 interface PersonHealthcareInlineCardProps {
@@ -33,15 +34,26 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
   plannedRetirementMonth,
   healthcareConfig,
   healthcareInflationRate,
-  currentState = 'MD',
-  targetState = 'FL',
+  currentState,
+  targetState = null,
+  relocationYear = null,
   startYear = 2026,
   accentColor = 'emerald',
   onChange,
 }) => {
-  const [activeTab, setActiveTab] = useState<'MD' | 'FL'>(() => {
-    return currentState === 'FL' ? 'FL' : 'MD';
-  });
+  const hasRelocation = relocationYear !== null && Boolean(targetState) && targetState !== currentState;
+  const currentProfile = getStateTaxProfile(currentState);
+  const targetProfile = targetState ? getStateTaxProfile(targetState) : null;
+
+  const [activeTab, setActiveTab] = useState<string>(currentState);
+
+  useEffect(() => {
+    if (!hasRelocation) {
+      setActiveTab(currentState);
+    } else if (activeTab !== currentState && activeTab !== targetState) {
+      setActiveTab(currentState);
+    }
+  }, [currentState, targetState, hasRelocation, activeTab]);
 
   const age65Year = birthYear + 65;
   const currentAge = startYear - birthYear;
@@ -92,8 +104,7 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
       medicareStartMode: healthcareConfig?.medicareStartMode ?? 'age65',
       medicareStartDate: healthcareConfig?.medicareStartDate ?? null,
       coveredByWorkingSpousePlan: healthcareConfig?.coveredByWorkingSpousePlan ?? false,
-      MD: healthcareConfig?.MD ? { ...healthcareConfig.MD } : createDefaultStateConfig(),
-      FL: healthcareConfig?.FL ? { ...healthcareConfig.FL } : createDefaultStateConfig(),
+      ...(healthcareConfig || {}),
     };
   }, [healthcareConfig]);
 
@@ -111,19 +122,29 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
     }
   }, [currentConfig.medicareStartDate, suggestedRetirementDate]);
 
+  const getStateConfig = (st: string): StateHealthcareConfig => {
+    const rawRecord = (currentConfig || {}) as Record<string, unknown>;
+    const direct = rawRecord[st];
+    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      return direct as StateHealthcareConfig;
+    }
+    return createDefaultStateConfig();
+  };
+
   const handleStateFieldChange = (
-    state: 'MD' | 'FL',
+    state: string,
     field: keyof StateHealthcareConfig,
     val: number | null
   ) => {
-    const updated = {
+    const existing = getStateConfig(state);
+    const updated: Record<string, unknown> = {
       ...currentConfig,
       [state]: {
-        ...currentConfig[state],
+        ...existing,
         [field]: val,
       },
     };
-    onChange(updated);
+    onChange(updated as unknown as HealthcareConfig);
   };
 
   const handleUniversalFieldChange = <K extends 'medicarePartBPremium' | 'fileSSA44LifeChangingEvent' | 'medicareStartMode' | 'medicareStartDate' | 'coveredByWorkingSpousePlan'>(
@@ -137,7 +158,7 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
     onChange(updated);
   };
 
-  const activeStateConfig = currentConfig[activeTab];
+  const activeStateConfig = getStateConfig(activeTab);
   const isEmerald = accentColor === 'emerald';
 
   // Compute display transition text and status
@@ -323,40 +344,61 @@ export const PersonHealthcareInlineCard: React.FC<PersonHealthcareInlineCardProp
           </div>
         </div>
 
-        {/* State Tab Switcher */}
-        <div className="flex items-center justify-between gap-2 p-1.5 bg-slate-950/70 rounded-xl border border-slate-800/80">
-          <div className="flex items-center gap-1.5 text-xs text-slate-400 px-2 font-medium">
-            <span>Jurisdiction:</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setActiveTab('MD')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'MD'
-                  ? isEmerald
+        {/* Jurisdiction Section */}
+        {!hasRelocation ? (
+          <div className="flex items-center justify-between gap-2 p-1.5 bg-slate-950/70 rounded-xl border border-slate-800/80">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400 px-2 font-medium">
+              <span>Jurisdiction:</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                  isEmerald
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
                     : 'bg-teal-500/20 text-teal-300 border border-teal-500/40 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
-              }`}
-            >
-              Maryland (MD) {currentState === 'MD' ? '• Current' : ''}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('FL')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'FL'
-                  ? isEmerald
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                    : 'bg-teal-500/20 text-teal-300 border border-teal-500/40 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
-              }`}
-            >
-              Florida (FL) {targetState === 'FL' ? '• Target' : ''}
-            </button>
+                }`}
+              >
+                {currentProfile?.name || currentState} ({currentState}) • Continuous Residency
+              </span>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex items-center justify-between gap-2 p-1.5 bg-slate-950/70 rounded-xl border border-slate-800/80">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400 px-2 font-medium">
+              <span>Jurisdiction:</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setActiveTab(currentState)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === currentState
+                    ? isEmerald
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                      : 'bg-teal-500/20 text-teal-300 border border-teal-500/40 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                }`}
+              >
+                {currentProfile?.name || currentState} ({currentState}) • Current
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (targetState) setActiveTab(targetState);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === targetState
+                    ? isEmerald
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                      : 'bg-teal-500/20 text-teal-300 border border-teal-500/40 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                }`}
+              >
+                {targetProfile?.name || targetState} ({targetState}) • Target ({relocationYear})
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Content Area for Active State */}

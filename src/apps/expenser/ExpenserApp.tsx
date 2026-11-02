@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Trash2,
   Calendar,
   FileText,
   CheckCircle2,
+  AlertCircle,
   RefreshCw,
   WifiOff,
   History,
@@ -33,7 +34,7 @@ import {
   Check,
   Smartphone,
 } from 'lucide-react';
-import { getStorageAdapter, AwsCloudStorageAdapter } from '../../shared/storage';
+import { getStorageAdapter, AwsCloudStorageAdapter, PlanSyncService } from '../../shared/storage';
 import { ActualExpense, ExpenseCategory } from '../../shared/types/expenses';
 import { resolveLoggedInPayerName } from '../../shared/utils/profileNames';
 import { AuthService } from '../../shared/auth/AuthService';
@@ -125,6 +126,10 @@ export const ExpenserApp: React.FC = () => {
   const [showCloudModal, setShowCloudModal] = useState<boolean>(false);
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
+  const [isSyncingPlan, setIsSyncingPlan] = useState<boolean>(false);
+  const [pullDistance, setPullDistance] = useState<number>(0);
+  const [syncFeedback, setSyncFeedback] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const touchStartRef = useRef<{ y: number; x: number; active: boolean }>({ y: 0, x: 0, active: false });
   const [currentUserEmail, setCurrentUserEmail] = useState<string>(() => AuthService.getSession()?.email || '');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
   const versionInfo = useMemo(() => getVersionInfo(), []);
@@ -232,7 +237,12 @@ export const ExpenserApp: React.FC = () => {
     }
   }, [adapter]);
 
-  const allowedPlannerCategories = useMemo(() => getPlannerCategories(), []);
+  const [planVersion, setPlanVersion] = useState<number>(0);
+  const allowedPlannerCategories = useMemo(() => {
+    // Reference planVersion so catalog re-reads from localStorage on cloud sync
+    void planVersion;
+    return getPlannerCategories();
+  }, [planVersion]);
 
   // New Category Modal form
   const [newCatGroup, setNewCatGroup] = useState<string>(() => {
@@ -246,6 +256,7 @@ export const ExpenserApp: React.FC = () => {
 
   // Unified Catalog Items (Planner detailed line items + custom categories)
   const allCatalogItems: PlannerExpenseLineItem[] = useMemo(() => {
+    void planVersion;
     const plannerItems = getPlannerExpenseCatalog();
     const merged = mergeWithCustomCategories(plannerItems, categories, allowedPlannerCategories);
 
@@ -256,7 +267,7 @@ export const ExpenserApp: React.FC = () => {
       }
       return true;
     });
-  }, [categories, allowedPlannerCategories]);
+  }, [categories, allowedPlannerCategories, planVersion]);
 
   // Filtered Catalog Items by Search Query
   const filteredCatalogItems: PlannerExpenseLineItem[] = useMemo(() => {
@@ -334,9 +345,11 @@ export const ExpenserApp: React.FC = () => {
     const firstSeenIndex: Record<string, number> = {};
 
     recentExpenses.forEach((exp, idx) => {
-      counts[exp.categoryId] = (counts[exp.categoryId] || 0) + 1;
-      if (firstSeenIndex[exp.categoryId] === undefined) {
-        firstSeenIndex[exp.categoryId] = idx;
+      const key = exp.catalogId || exp.categoryId || exp.name;
+      if (!key) return;
+      counts[key] = (counts[key] || 0) + 1;
+      if (firstSeenIndex[key] === undefined) {
+        firstSeenIndex[key] = idx;
       }
     });
 
@@ -364,7 +377,10 @@ export const ExpenserApp: React.FC = () => {
   }, [recentExpenses, allCatalogItems, allowedPlannerCategories]);
 
   // Load Categories & Expenses
-  const loadData = useCallback(async () => {
+  const loadInFlightRef = useRef<boolean>(false);
+  const loadRerunRef = useRef<boolean>(false);
+
+  const loadDataOnce = useCallback(async () => {
     try {
       // 1. Read Detailed Expenses SSOT from localStorage
       const raw = typeof window !== 'undefined' ? window.localStorage.getItem('retirement_planner_inputs') : null;
@@ -412,14 +428,61 @@ export const ExpenserApp: React.FC = () => {
 
       const pending = await adapter.getPendingSyncExpenses();
       setPendingCount(pending.length);
+      setPlanVersion(v => v + 1);
     } catch (err) {
       console.error('Failed to load storage data:', err);
     }
   }, [adapter, selectedCategoryId, recentSortBy]);
 
+  // Loads run one at a time. Overlapping runs (creating an expense name fires several
+  // storage events) would otherwise act on a stale plan and purge the brand-new item.
+  const loadData = useCallback(async () => {
+    if (loadInFlightRef.current) {
+      loadRerunRef.current = true;
+      return;
+    }
+    loadInFlightRef.current = true;
+    try {
+      do {
+        loadRerunRef.current = false;
+        await loadDataOnce();
+      } while (loadRerunRef.current);
+    } finally {
+      loadInFlightRef.current = false;
+    }
+  }, [loadDataOnce]);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // One-time cache migration & flush for unified schema version 2
+  useEffect(() => {
+    const checkSchemaVersionAndFlush = async () => {
+      if (typeof window === 'undefined') return;
+      const currentVersion = window.localStorage.getItem('expenser_schema_version');
+      if (currentVersion !== '2') {
+        try {
+          if (adapter.clearAllExpenses) {
+            await adapter.clearAllExpenses();
+          }
+          window.localStorage.setItem('expenser_schema_version', '2');
+          if (navigator.onLine && AuthService.isAuthenticated() && adapter.getAllExpensesFromCloud) {
+            await adapter.getAllExpensesFromCloud();
+          }
+          setSyncFeedback({
+            message: 'Expense cache updated to unified schema.',
+            type: 'info',
+          });
+          setTimeout(() => setSyncFeedback(null), 3000);
+          await loadData();
+        } catch (err) {
+          console.warn('Failed to perform schema cache refresh:', err);
+        }
+      }
+    };
+    checkSchemaVersionAndFlush();
+  }, [adapter, loadData]);
 
   // Online / Offline & Cloud Sync Listeners
   useEffect(() => {
@@ -427,6 +490,7 @@ export const ExpenserApp: React.FC = () => {
     const handleOffline = () => setIsOnline(false);
     const handleCloudSync = () => {
       setPayerName(resolveLoggedInPayerName());
+      setPlanVersion(v => v + 1);
       loadData();
     };
     const unsubscribeAuth = AuthService.subscribe(s => {
@@ -445,6 +509,8 @@ export const ExpenserApp: React.FC = () => {
     window.addEventListener('cloud_categories_synced', handleCloudSync);
     window.addEventListener('cloud_expenses_synced', handleCloudSync);
     window.addEventListener('cloud_sync_completed', handleCloudSync);
+    window.addEventListener('retirement_planner_inputs_updated', handleCloudSync);
+    window.addEventListener('retirement_planner_plan_synced', handleCloudSync);
     window.addEventListener('storage', handleStorage);
 
     return () => {
@@ -453,6 +519,8 @@ export const ExpenserApp: React.FC = () => {
       window.removeEventListener('cloud_categories_synced', handleCloudSync);
       window.removeEventListener('cloud_expenses_synced', handleCloudSync);
       window.removeEventListener('cloud_sync_completed', handleCloudSync);
+      window.removeEventListener('retirement_planner_inputs_updated', handleCloudSync);
+      window.removeEventListener('retirement_planner_plan_synced', handleCloudSync);
       window.removeEventListener('storage', handleStorage);
       unsubscribeAuth();
     };
@@ -496,10 +564,13 @@ export const ExpenserApp: React.FC = () => {
   }, [pendingCount, retryQueuedSync]);
 
   const handleSyncPillTap = async () => {
-    if (pendingCount <= 0) return;
-    const reason = await retryQueuedSync();
-    if (reason) {
-      alert(`Queued expenses are not synced yet.\n\n${reason}`);
+    if (pendingCount > 0) {
+      const reason = await retryQueuedSync();
+      if (reason) {
+        alert(`Queued expenses are not synced yet.\n\n${reason}`);
+      }
+    } else {
+      await syncPlanAndCategories(true);
     }
   };
 
@@ -512,6 +583,141 @@ export const ExpenserApp: React.FC = () => {
         /* ignore */
       }
     }
+  };
+
+  // Synchronize Planner categories & settings with AWS cloud
+  const syncPlanAndCategories = useCallback(async (isManual = false): Promise<boolean> => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (isManual) {
+        setSyncFeedback({ message: 'Offline - cannot sync with cloud', type: 'error' });
+        setTimeout(() => setSyncFeedback(null), 3000);
+      }
+      return false;
+    }
+    if (!AuthService.isAuthenticated()) {
+      if (isManual) {
+        setSyncFeedback({ message: 'Sign in to sync with planner', type: 'info' });
+        setTimeout(() => setSyncFeedback(null), 3000);
+      }
+      return false;
+    }
+
+    setIsSyncingPlan(true);
+    try {
+      // 1. Sync remote plan from AWS DynamoDB to localStorage
+      const result = await PlanSyncService.syncPlanNow();
+
+      // 2. Invalidate in-memory category cache and flush pending items
+      if (adapter instanceof AwsCloudStorageAdapter) {
+        adapter.invalidateCategoryCache();
+        await adapter.getCategories(true);
+        await adapter.flushPendingExpenses();
+      }
+
+      // 3. Reload Expenser local state
+      await loadData();
+
+      if (isManual) {
+        const msg = result.action === 'downloaded'
+          ? 'Categories & Plan updated from cloud!'
+          : 'Categories are up to date';
+        setSyncFeedback({ message: msg, type: 'success' });
+        triggerHaptic(15);
+        setTimeout(() => setSyncFeedback(null), 2500);
+      }
+      return true;
+    } catch (err) {
+      console.warn('Sync plan and categories failed:', err);
+      if (isManual) {
+        setSyncFeedback({ message: 'Sync failed - check connection', type: 'error' });
+        setTimeout(() => setSyncFeedback(null), 3000);
+      }
+      return false;
+    } finally {
+      setIsSyncingPlan(false);
+    }
+  }, [adapter, loadData]);
+
+  // Automatic throttled background sync of plan & categories on app startup / resume (15-min TTL)
+  useEffect(() => {
+    const PLAN_SYNC_TTL_MS = 15 * 60 * 1000;
+    const checkAndSyncPlan = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      if (!AuthService.isAuthenticated()) return;
+      const lastSyncRaw = typeof window !== 'undefined' ? window.localStorage.getItem('retirement_planner_plan_synced_at') : null;
+      const lastSyncTime = lastSyncRaw ? new Date(lastSyncRaw).getTime() : 0;
+      const now = Date.now();
+      if (now - lastSyncTime > PLAN_SYNC_TTL_MS) {
+        syncPlanAndCategories(false).catch(() => {});
+      }
+    };
+
+    checkAndSyncPlan();
+    document.addEventListener('visibilitychange', checkAndSyncPlan);
+    window.addEventListener('online', checkAndSyncPlan);
+    return () => {
+      document.removeEventListener('visibilitychange', checkAndSyncPlan);
+      window.removeEventListener('online', checkAndSyncPlan);
+    };
+  }, [syncPlanAndCategories]);
+
+  // Pull-To-Refresh Touch Gesture Handlers
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (
+      showRecentModal ||
+      showCategoryModal ||
+      showDateModal ||
+      showCloudModal ||
+      showAboutModal ||
+      isMenuOpen ||
+      isSavingEdit ||
+      isCategorySearchOpen ||
+      isEditCategoryPickerOpen
+    ) {
+      touchStartRef.current.active = false;
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [data-scrollable="true"]')) {
+      touchStartRef.current.active = false;
+      return;
+    }
+    const touch = e.touches[0];
+    touchStartRef.current = { y: touch.clientY, x: touch.clientX, active: true };
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartRef.current.active || isSyncingPlan) return;
+    const touch = e.touches[0];
+    const dy = touch.clientY - touchStartRef.current.y;
+    const dx = touch.clientX - touchStartRef.current.x;
+
+    // Only process downward pulls that are distinctly vertical
+    if (dy > 12 && dy > Math.abs(dx) * 1.25) {
+      const distance = Math.min(75, Math.pow(dy, 0.85));
+      setPullDistance(distance);
+      if (distance >= 55 && pullDistance < 55) {
+        triggerHaptic(8);
+      }
+    } else if (dy < 0 && pullDistance > 0) {
+      setPullDistance(0);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (!touchStartRef.current.active) return;
+    touchStartRef.current.active = false;
+    if (pullDistance >= 55 && !isSyncingPlan) {
+      triggerHaptic(15);
+      syncPlanAndCategories(true);
+    }
+    setPullDistance(0);
+  };
+
+  const handleTouchCancel = () => {
+    touchStartRef.current.active = false;
+    setPullDistance(0);
   };
 
   // Keypad Handlers
@@ -598,12 +804,17 @@ export const ExpenserApp: React.FC = () => {
     try {
       const selectedItem = allCatalogItems.find(c => c.id === selectedCategoryId);
       const activePayer = payerName || resolveLoggedInPayerName();
+      const category = selectedItem?.groupCategory || 'Uncategorized';
+      const name = selectedItem?.name || selectedItem?.displayName || 'Expense';
 
       await adapter.saveExpense({
         date: expenseDate,
         amount: parsedAmount,
+        catalogId: selectedCategoryId,
+        category,
+        name,
         categoryId: selectedCategoryId,
-        categoryName: selectedItem ? selectedItem.displayName : 'Uncategorized',
+        categoryName: `${category} - ${name}`,
         enteredBy: activePayer,
         notes: notes.trim() || undefined,
       });
@@ -646,6 +857,18 @@ export const ExpenserApp: React.FC = () => {
       groupCategory: group,
       plannedMonthlyDefault: budgetVal,
     });
+
+    // Mark the local plan as newer than the cloud copy and upload it, so the next plan sync
+    // does not overwrite the new item and the desktop Planner receives it.
+    try {
+      const rawInputs = window.localStorage.getItem('retirement_planner_inputs');
+      if (rawInputs) {
+        const rawSavedPlans = window.localStorage.getItem('retirement_planner_saved_plans');
+        PlanSyncService.scheduleAutoSave(JSON.parse(rawInputs), rawSavedPlans ? JSON.parse(rawSavedPlans) : []);
+      }
+    } catch (err) {
+      console.warn('Failed to schedule plan upload after creating expense name:', err);
+    }
 
     // 2. Persist to Expenser Storage Adapter
     const created = await adapter.saveCategory({
@@ -714,7 +937,7 @@ export const ExpenserApp: React.FC = () => {
     setEditingExpense(exp);
     setEditAmountStr(exp.amount.toFixed(2));
     setEditDate(exp.date);
-    setEditCategoryId(exp.categoryId);
+    setEditCategoryId(exp.catalogId || exp.categoryId || '');
     setEditCategoryQuery('');
     setIsEditCategoryPickerOpen(false);
     setEditNotes(exp.notes || '');
@@ -743,7 +966,8 @@ export const ExpenserApp: React.FC = () => {
     }
 
     const targetCategory = allCatalogItems.find(c => c.id === editCategoryId);
-    const catName = targetCategory ? (targetCategory.displayName || targetCategory.name) : editingExpense.categoryName;
+    const category = targetCategory?.groupCategory || editingExpense.category || 'Uncategorized';
+    const name = targetCategory?.name || targetCategory?.displayName || editingExpense.name || 'Expense';
 
     setIsSavingEdit(true);
     setEditError(null);
@@ -752,8 +976,11 @@ export const ExpenserApp: React.FC = () => {
       await adapter.updateExpense(editingExpense.expenseId, {
         amount: Math.round(parsedAmount * 100) / 100,
         date: editDate,
+        catalogId: editCategoryId,
+        category,
+        name,
         categoryId: editCategoryId,
-        categoryName: catName,
+        categoryName: `${category} - ${name}`,
         notes: editNotes.trim() || undefined,
       });
 
@@ -778,7 +1005,13 @@ export const ExpenserApp: React.FC = () => {
   const selectedCategoryObj = allCatalogItems.find(c => c.id === selectedCategoryId);
 
   const appContent = (
-    <div className="h-full w-full max-h-full overflow-hidden bg-slate-950 text-slate-100 flex flex-col justify-between select-none font-sans antialiased relative pb-safe">
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchCancel}
+      className="h-full w-full max-h-full overflow-hidden bg-slate-950 text-slate-100 flex flex-col select-none font-sans antialiased relative pb-safe"
+    >
       {/* Top App Header */}
       <header className="px-4 py-2.5 bg-slate-900/90 backdrop-blur border-b border-slate-800/80 shrink-0 z-30 flex items-center justify-between">
         <div className="flex items-center space-x-2.5">
@@ -799,19 +1032,30 @@ export const ExpenserApp: React.FC = () => {
           <button
             type="button"
             onClick={handleSyncPillTap}
-            title={pendingCount > 0 ? 'Tap to retry syncing queued expenses' : undefined}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+            title={pendingCount > 0 ? 'Tap to retry syncing queued expenses' : 'Tap to sync plan & categories'}
+            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
               isOnline
                 ? pendingCount > 0
-                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 cursor-pointer'
-                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 cursor-default'
+                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 cursor-pointer hover:bg-amber-500/20'
+                  : isSyncingPlan
+                  ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30 cursor-pointer'
+                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 cursor-pointer hover:bg-emerald-500/20'
                 : 'bg-rose-500/10 text-rose-400 border-rose-500/30 cursor-default'
             }`}
           >
             {isOnline ? (
               <>
-                <span className={`w-1.5 h-1.5 rounded-full ${pendingCount > 0 ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
-                <span>{pendingCount > 0 ? `${pendingCount} Queued` : 'Synced'}</span>
+                {isSyncingPlan ? (
+                  <>
+                    <RefreshCw className="w-3 h-3 text-cyan-400 animate-spin" />
+                    <span>Syncing...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`w-1.5 h-1.5 rounded-full ${pendingCount > 0 ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
+                    <span>{pendingCount > 0 ? `${pendingCount} Queued` : 'Synced'}</span>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -831,7 +1075,7 @@ export const ExpenserApp: React.FC = () => {
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-sm shadow-emerald-950'
                   : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-700/60'
               }`}
-              title={isSimulatePhone ? 'Exit Android Phone Simulation (412 × 915)' : 'Simulate Android Phone Layout (412 × 915)'}
+              title={isSimulatePhone ? 'Exit Android Phone Simulation (360 × 806)' : 'Simulate Android Phone Layout (360 × 806 / 720 × 1612)'}
               aria-label="Toggle Android phone layout simulation"
             >
               <Smartphone className="w-4 h-4" />
@@ -853,6 +1097,53 @@ export const ExpenserApp: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {/* Pull-To-Refresh Indicator */}
+      {(pullDistance > 0 || isSyncingPlan) && (
+        <div
+          className="w-full overflow-hidden transition-all duration-150 ease-out flex items-center justify-center pointer-events-none z-20 shrink-0"
+          style={{
+            height: isSyncingPlan ? '42px' : `${pullDistance}px`,
+            opacity: isSyncingPlan ? 1 : Math.min(1, pullDistance / 35),
+          }}
+        >
+          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/95 border border-slate-700/80 shadow-lg text-xs font-medium text-slate-200">
+            <RefreshCw
+              className={`w-3.5 h-3.5 text-emerald-400 ${isSyncingPlan ? 'animate-spin' : ''}`}
+              style={{ transform: !isSyncingPlan ? `rotate(${pullDistance * 4}deg)` : undefined }}
+            />
+            <span>
+              {isSyncingPlan
+                ? 'Syncing categories...'
+                : pullDistance >= 55
+                ? 'Release to sync categories'
+                : 'Pull down to refresh'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Sync Feedback Toast */}
+      {syncFeedback && (
+        <div className="absolute top-14 left-4 right-4 z-50 flex items-center justify-center pointer-events-none animate-in fade-in slide-in-from-top-2 duration-200">
+          <div
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow-xl text-xs font-medium border backdrop-blur-md ${
+              syncFeedback.type === 'success'
+                ? 'bg-emerald-950/95 text-emerald-200 border-emerald-500/40 shadow-emerald-950/60'
+                : syncFeedback.type === 'error'
+                ? 'bg-rose-950/95 text-rose-200 border-rose-500/40 shadow-rose-950/60'
+                : 'bg-slate-900/95 text-slate-200 border-slate-700 shadow-slate-950/60'
+            }`}
+          >
+            {syncFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            )}
+            <span>{syncFeedback.message}</span>
+          </div>
+        </div>
+      )}
 
       {/* Hamburger Navigation Menu Dropdown */}
       {isMenuOpen && (
@@ -913,7 +1204,30 @@ export const ExpenserApp: React.FC = () => {
               )}
             </button>
 
-            {/* Menu Item 2: Sign In / Cloud Account & Passkeys */}
+            {/* Menu Item 2: Sync Plan & Categories */}
+            <button
+              type="button"
+              onClick={() => {
+                setIsMenuOpen(false);
+                syncPlanAndCategories(true);
+              }}
+              disabled={isSyncingPlan}
+              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-slate-800/40 hover:bg-slate-800 text-slate-200 hover:text-white transition-colors text-left"
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20">
+                  <RefreshCw className={`w-4 h-4 ${isSyncingPlan ? 'animate-spin' : ''}`} />
+                </div>
+                <div>
+                  <div className="text-sm font-medium">Sync Plan & Categories</div>
+                  <div className="text-[11px] text-slate-400">
+                    {isSyncingPlan ? 'Syncing with cloud...' : 'Refresh categories from planner'}
+                  </div>
+                </div>
+              </div>
+            </button>
+
+            {/* Menu Item 3: Sign In / Cloud Account & Passkeys */}
             <button
               type="button"
               onClick={() => {
@@ -1003,7 +1317,7 @@ export const ExpenserApp: React.FC = () => {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col justify-between p-3 sm:p-4 gap-2 overflow-hidden min-h-0">
+      <main className="flex-1 flex flex-col p-3 sm:p-4 gap-2.5 overflow-hidden min-h-0">
         {/* Amount Display with Today's Stat & Interactive Date Link */}
         <div className="bg-gradient-to-b from-slate-900/90 to-slate-900/50 rounded-2xl p-2.5 sm:p-3 border border-slate-800/80 shadow-inner flex flex-col items-center justify-center relative overflow-hidden shrink-0">
           {/* Header Row: Clickable Date Selector (Left) & Today's Total (Right) */}
@@ -1070,7 +1384,7 @@ export const ExpenserApp: React.FC = () => {
         {/* Category Search & Autocomplete Selector */}
         <div className="relative z-20 shrink-0">
           <div className="flex items-center justify-between text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1 px-1">
-            <span>Budgeted Line Item</span>
+            <span>Expense Name & Category</span>
             <button
               onClick={() => {
                 if (categorySearchQuery.trim()) {
@@ -1080,7 +1394,7 @@ export const ExpenserApp: React.FC = () => {
               }}
               className="text-emerald-400 hover:text-emerald-300 flex items-center gap-0.5 lowercase font-normal cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> new line item
+              <Plus className="w-3.5 h-3.5" /> new expense name
             </button>
           </div>
 
@@ -1099,8 +1413,8 @@ export const ExpenserApp: React.FC = () => {
                 }}
                 placeholder={
                   selectedCategoryObj
-                    ? selectedCategoryObj.displayName
-                    : 'Search line items (e.g. Living, Groceries)...'
+                    ? `${selectedCategoryObj.groupCategory} - ${selectedCategoryObj.name}`
+                    : 'Search expense names or categories...'
                 }
                 className="w-full bg-transparent text-xs text-white placeholder-slate-400 focus:outline-none"
               />
@@ -1132,7 +1446,7 @@ export const ExpenserApp: React.FC = () => {
                 {filteredCatalogItems.length === 0 ? (
                   <div className="p-3 text-center space-y-2">
                     <p className="text-xs text-slate-400">
-                      No line items matching &ldquo;<span className="text-white font-medium">{categorySearchQuery}</span>&rdquo;
+                      No expense names matching &ldquo;<span className="text-white font-medium">{categorySearchQuery}</span>&rdquo;
                     </p>
                     <button
                       type="button"
@@ -1143,7 +1457,7 @@ export const ExpenserApp: React.FC = () => {
                       }}
                       className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-semibold inline-flex items-center gap-1 cursor-pointer"
                     >
-                      <Plus className="w-3 h-3" /> Add as new line item
+                      <Plus className="w-3 h-3" /> Add as new expense name
                     </button>
                   </div>
                 ) : (
@@ -1250,7 +1564,7 @@ export const ExpenserApp: React.FC = () => {
         </div>
 
         {/* Touch Numeric Keypad */}
-        <div className="grid grid-cols-3 gap-1.5 sm:gap-2 flex-1 min-h-0 max-h-56 items-stretch">
+        <div className="grid grid-cols-3 gap-2 flex-1 min-h-[200px] items-stretch">
           {['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'BACKSPACE'].map(key => {
             const isBackspace = key === 'BACKSPACE';
             return (
@@ -1260,7 +1574,7 @@ export const ExpenserApp: React.FC = () => {
                 onClick={() => handleKeypadPress(key)}
                 aria-label={isBackspace ? 'Backspace' : key}
                 title={isBackspace ? 'Backspace' : undefined}
-                className={`h-full min-h-[38px] max-h-[52px] rounded-xl sm:rounded-2xl font-bold text-lg sm:text-xl flex items-center justify-center transition-all active:scale-95 shadow-sm cursor-pointer ${
+                className={`h-full min-h-[44px] rounded-xl sm:rounded-2xl font-bold text-xl sm:text-2xl flex items-center justify-center transition-all active:scale-95 shadow-sm cursor-pointer ${
                   isBackspace
                     ? 'bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-slate-800'
                     : 'bg-slate-900 hover:bg-slate-800/90 text-white border border-slate-800/80 hover:border-slate-700'
@@ -1277,7 +1591,7 @@ export const ExpenserApp: React.FC = () => {
           type="button"
           disabled={parsedAmount <= 0 || isSubmitting}
           onClick={handleSaveExpense}
-          className={`w-full py-2.5 sm:py-3.5 rounded-xl sm:rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center space-x-2 transition-all shadow-xl shrink-0 cursor-pointer ${
+          className={`w-full py-3.5 sm:py-4 rounded-xl sm:rounded-2xl font-bold text-base sm:text-lg flex items-center justify-center space-x-2 transition-all shadow-xl shrink-0 cursor-pointer ${
             parsedAmount > 0
               ? 'bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 shadow-emerald-950/40 active:scale-[0.98]'
               : 'bg-slate-900 text-slate-500 border border-slate-800 cursor-not-allowed'
@@ -1425,8 +1739,9 @@ export const ExpenserApp: React.FC = () => {
                         >
                           <div className="flex items-center space-x-1.5">
                             <span className="font-semibold text-sm text-white">${exp.amount.toFixed(2)}</span>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-medium truncate max-w-[150px]">
-                              {exp.categoryName}
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-medium truncate max-w-[170px]" title={exp.category && exp.name ? `${exp.category} • ${exp.name}` : exp.categoryName}>
+                              {exp.category && exp.name ? `${exp.name}` : exp.categoryName}
+                              {exp.category && <span className="text-slate-500 ml-1">({exp.category})</span>}
                             </span>
                           </div>
                           <div className="text-[11px] text-slate-400 mt-0.5 flex items-center space-x-1.5 flex-wrap">
@@ -1606,10 +1921,10 @@ export const ExpenserApp: React.FC = () => {
                       />
                       <div className="min-w-0">
                         <div className="text-xs font-semibold text-white truncate">
-                          {editSelectedCategoryObj?.displayName || editSelectedCategoryObj?.name || editingExpense.categoryName}
+                          {editSelectedCategoryObj ? `${editSelectedCategoryObj.groupCategory} - ${editSelectedCategoryObj.name}` : (editingExpense.category ? `${editingExpense.category} - ${editingExpense.name}` : editingExpense.categoryName || '')}
                         </div>
                         <div className="text-[10px] text-slate-500">
-                          {editSelectedCategoryObj?.groupCategory || 'Expense Line Item'}
+                          {editSelectedCategoryObj?.groupCategory || editingExpense.category || 'Expense Name'}
                         </div>
                       </div>
                     </div>
@@ -1788,7 +2103,7 @@ export const ExpenserApp: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Line Item Name *
+                  Expense Name *
                 </label>
                 <input
                   type="text"
@@ -1974,13 +2289,13 @@ export const ExpenserApp: React.FC = () => {
 
   if (isSimulatePhone && !isMobileOrPwa) {
     return (
-      <div className="min-h-screen min-h-[100dvh] bg-slate-950 flex flex-col items-center justify-center p-2 sm:p-4 selection:bg-emerald-500/30 font-sans antialiased overflow-y-auto">
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-start sm:justify-center p-2 sm:p-4 selection:bg-emerald-500/30 font-sans antialiased overflow-y-auto">
         {/* Simulator Control Banner */}
-        <div className="mb-2 flex items-center justify-between w-full max-w-[412px] px-2 text-xs text-slate-400 shrink-0">
+        <div className="mb-2 flex items-center justify-between w-full max-w-[380px] px-2 text-xs text-slate-400 shrink-0">
           <div className="flex items-center space-x-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <span className="font-mono text-slate-200 font-semibold">Android Simulation</span>
-            <span className="text-slate-500 text-[11px] font-mono">412 × 915</span>
+            <span className="text-slate-500 text-[11px] font-mono">360 × 806 (720 × 1612)</span>
           </div>
           <button
             type="button"
@@ -1991,25 +2306,35 @@ export const ExpenserApp: React.FC = () => {
           </button>
         </div>
 
-        {/* Realistic Android Phone Bezel Shell */}
-        <div className="w-[412px] h-[915px] max-h-[calc(100dvh-44px)] rounded-[42px] border-[10px] border-slate-800 bg-slate-950 shadow-[0_25px_60px_-15px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.06)] relative overflow-hidden flex flex-col ring-1 ring-slate-700/60 [transform:translateZ(0)] shrink-0">
-          {/* Top Camera Punch Hole */}
-          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-slate-900 border border-slate-700/80 z-[60] pointer-events-none shadow-inner" />
+        {/* Realistic Android Phone Bezel Shell - Strict fixed dimensions matching phone screen size */}
+        <div className="w-[380px] h-[826px] min-w-[380px] max-w-[380px] min-h-[826px] max-h-[826px] rounded-[42px] border-[10px] border-slate-800 bg-slate-950 shadow-[0_25px_60px_-15px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.06)] relative overflow-hidden flex flex-col ring-1 ring-slate-700/60 [transform:translateZ(0)] shrink-0">
+          {/* Top Status Bar with Camera Punch Hole */}
+          <div className="h-7 w-full bg-slate-900/90 border-b border-slate-800/40 flex items-center justify-between px-5 text-[11px] font-medium text-slate-400 shrink-0 z-30 select-none">
+            <span>9:41</span>
+            {/* Top Camera Punch Hole */}
+            <div className="w-3.5 h-3.5 rounded-full bg-slate-950 border border-slate-700/80 shadow-inner" />
+            <div className="flex items-center space-x-1.5 text-[10px]">
+              <span>5G</span>
+              <span>100%</span>
+            </div>
+          </div>
 
-          {/* Inner Phone Viewport */}
-          <div className="flex-1 w-full h-full overflow-hidden flex flex-col relative pt-1">
+          {/* Inner Phone Viewport - Exactly 360px wide, fills the remaining 758px height */}
+          <div className="flex-1 w-full overflow-hidden flex flex-col relative">
             {appContent}
           </div>
 
-          {/* Android Home Navigation Gesture Bar */}
-          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-28 h-1 bg-slate-600/70 rounded-full z-[60] pointer-events-none" />
+          {/* Android Home Navigation Gesture Bar Area */}
+          <div className="h-5 w-full bg-slate-950 flex items-center justify-center shrink-0 z-30 pointer-events-none">
+            <div className="w-28 h-1 bg-slate-600/70 rounded-full" />
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen h-[100dvh] max-h-screen max-h-[100dvh] overflow-hidden bg-slate-950 text-slate-100 flex flex-col justify-between select-none font-sans antialiased max-w-md mx-auto shadow-2xl relative border-x border-slate-800/60 pb-safe">
+    <div className="h-screen h-[100dvh] max-h-screen max-h-[100dvh] overflow-hidden bg-slate-950 text-slate-100 flex flex-col select-none font-sans antialiased w-full max-w-md mx-auto shadow-2xl relative sm:border-x sm:border-slate-800/60 pb-safe">
       {appContent}
     </div>
   );

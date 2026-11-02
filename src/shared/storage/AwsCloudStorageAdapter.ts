@@ -1,10 +1,12 @@
-import { ActualExpense, ExpenseCategory, FullHouseholdArchive, StorageAdapter, SyncStatus } from '../types/expenses';
+import { ActualExpense, ExpenseCategory, FullHouseholdArchive, NewExpenseInput, StorageAdapter } from '../types/expenses';
 import { IndexedDbStorageAdapter } from './IndexedDbStorageAdapter';
 import { AuthService } from '../auth/AuthService';
 import { getCloudConfig } from '../auth/config';
+import { CloudRebalancingStorage } from './rebalancing/CloudRebalancingStorage';
 
 const FLUSH_BATCH_SIZE = 25;
 const FLUSH_MAX_ATTEMPTS = 3;
+const PENDING_CATEGORY_PUSHES_KEY = 'expenser_pending_category_pushes';
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -25,6 +27,41 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
 
   constructor(localAdapter?: IndexedDbStorageAdapter) {
     this.localAdapter = localAdapter || new IndexedDbStorageAdapter();
+  }
+
+  /**
+   * IDs of locally saved categories the cloud has not confirmed yet. They survive reloads so a
+   * cloud refresh never purges a category whose push is still in flight or failed.
+   */
+  private getPendingCategoryPushIds(): Set<string> {
+    if (typeof window === 'undefined') return new Set();
+    try {
+      const raw = window.localStorage.getItem(PENDING_CATEGORY_PUSHES_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private setPendingCategoryPushIds(ids: Set<string>): void {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PENDING_CATEGORY_PUSHES_KEY, JSON.stringify([...ids]));
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  private markCategoryPushPending(id: string): void {
+    const ids = this.getPendingCategoryPushIds();
+    ids.add(id);
+    this.setPendingCategoryPushIds(ids);
+  }
+
+  private clearCategoryPushPending(id: string): void {
+    const ids = this.getPendingCategoryPushIds();
+    if (ids.delete(id)) this.setPendingCategoryPushIds(ids);
   }
 
   /** Human-readable reason the last expense sync attempt failed, or null if it succeeded. */
@@ -93,12 +130,28 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
         ? data.categories
         : [];
 
+      // Let in-flight pushes finish, then retry any that failed, so a brand-new local
+      // category is never mistaken for one that was deleted in the cloud.
+      await this.categoryPushChain;
       const remoteIds = new Set(remoteCats.map(c => c.id));
       const localCats = await this.localAdapter.getCategories();
+      const pendingIds = this.getPendingCategoryPushIds();
 
-      // 1. Purge any local categories that were deleted in the cloud
       for (const localCat of localCats) {
-        if (!remoteIds.has(localCat.id)) {
+        if (remoteIds.has(localCat.id)) {
+          this.clearCategoryPushPending(localCat.id);
+        } else if (pendingIds.has(localCat.id)) {
+          try {
+            await this.pushCategoryToCloud(localCat);
+          } catch (err) {
+            console.warn('Retry of category push failed:', err);
+          }
+        }
+      }
+
+      // 1. Purge any local categories that were deleted in the cloud (never unpushed ones)
+      for (const localCat of localCats) {
+        if (!remoteIds.has(localCat.id) && !pendingIds.has(localCat.id)) {
           await this.localAdapter.deleteCategory(localCat.id);
         }
       }
@@ -129,6 +182,7 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     }
 
     const saved = await this.localAdapter.saveCategory(category);
+    if (!unchanged) this.markCategoryPushPending(saved.id);
 
     // Sync to DynamoDB only when something actually changed, one request at a time
     if (!unchanged && typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {
@@ -147,16 +201,21 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     const headers = await this.getAuthHeaders();
     if (!headers) return;
 
-    await fetch(`${this.getApiEndpoint()}/api/categories`, {
+    const response = await fetch(`${this.getApiEndpoint()}/api/categories`, {
       method: 'POST',
       headers,
       body: JSON.stringify(category),
     });
+    if (!response.ok) {
+      throw new Error(`Failed to push category ${category.id} (status ${response.status})`);
+    }
+    this.clearCategoryPushPending(category.id);
   }
 
   async deleteCategory(id: string): Promise<void> {
     this.lastCategorySyncTime = Date.now();
     await this.localAdapter.deleteCategory(id);
+    this.clearCategoryPushPending(id);
 
     if (typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {
       try {
@@ -228,14 +287,33 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
         }
       }
 
-      // 3. Save / update all authoritative remote expenses
+      // 3. Save / update authoritative remote expenses, preserving newer local edits
       for (const exp of remoteExpenses) {
-        if (!pendingIds.has(exp.expenseId)) {
-          await this.localAdapter.saveExpense({
-            ...exp,
-            syncStatus: 'SYNCED',
-          });
+        if (pendingIds.has(exp.expenseId)) {
+          continue;
         }
+
+        if (this.localAdapter.getExpenseById) {
+          const localExisting = await this.localAdapter.getExpenseById(exp.expenseId);
+          if (localExisting) {
+            if (localExisting.syncStatus === 'PENDING_SYNC') {
+              continue;
+            }
+            if (
+              localExisting.updatedAt &&
+              exp.updatedAt &&
+              new Date(localExisting.updatedAt).getTime() > new Date(exp.updatedAt).getTime()
+            ) {
+              // Local expense is newer than remote snapshot; preserve local edit
+              continue;
+            }
+          }
+        }
+
+        await this.localAdapter.saveExpense({
+          ...exp,
+          syncStatus: 'SYNCED',
+        });
       }
     } finally {
       this.isSyncingExpenses = false;
@@ -277,12 +355,29 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
       for (const item of rawList) {
         const expId = typeof item.expenseId === 'string' ? item.expenseId : undefined;
         if (expId && !pendingIds.has(expId)) {
+          let category = typeof item.category === 'string' ? item.category : undefined;
+          let name = typeof item.name === 'string' ? item.name : undefined;
+          if (!category && typeof item.categoryName === 'string') {
+            const parts = item.categoryName.split(' - ');
+            category = parts[0] || 'Uncategorized';
+            name = parts.slice(1).join(' - ') || item.categoryName;
+          }
+          const catalogId =
+            typeof item.catalogId === 'string'
+              ? item.catalogId
+              : typeof item.categoryId === 'string'
+              ? item.categoryId
+              : 'uncategorized';
+
           await this.localAdapter.saveExpense({
             expenseId: expId,
+            catalogId,
+            category: category || 'Uncategorized',
+            name: name || 'Expense',
             date: typeof item.date === 'string' ? item.date : '',
             amount: Number(item.amount) || 0,
-            categoryId: typeof item.categoryId === 'string' ? item.categoryId : 'uncategorized',
-            categoryName: typeof item.categoryName === 'string' ? item.categoryName : 'Uncategorized',
+            categoryId: catalogId,
+            categoryName: `${category || 'Uncategorized'} - ${name || 'Expense'}`,
             enteredBy: typeof item.enteredBy === 'string' ? item.enteredBy : 'Primary',
             notes: typeof item.notes === 'string' ? item.notes : undefined,
             tags: Array.isArray(item.tags) ? (item.tags as string[]) : undefined,
@@ -303,7 +398,7 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     return this.localAdapter.getRecentExpenses(limit, sortBy);
   }
 
-  async saveExpense(expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'>): Promise<ActualExpense> {
+  async saveExpense(expense: NewExpenseInput): Promise<ActualExpense> {
     // 1. Write to local IndexedDB first with PENDING_SYNC status (100% offline-ready)
     const saved = await this.localAdapter.saveExpense(expense);
 
@@ -317,16 +412,7 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     return saved;
   }
 
-  async saveExpensesBatch(
-    expenses: Array<
-      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-        expenseId?: string;
-        createdAt?: string;
-        updatedAt?: string;
-        syncStatus?: SyncStatus;
-      }
-    >
-  ): Promise<ActualExpense[]> {
+  async saveExpensesBatch(expenses: NewExpenseInput[]): Promise<ActualExpense[]> {
     if (expenses.length === 0) return [];
 
     // 1. Write entire batch to local IndexedDB in a single transaction
@@ -388,6 +474,42 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
     return updated;
   }
 
+  async updateExpensesBatch(
+    batch: Array<{ id: string; updates: Partial<ActualExpense> }>
+  ): Promise<ActualExpense[]> {
+    if (batch.length === 0) return [];
+
+    let updated: ActualExpense[];
+    if (this.localAdapter.updateExpensesBatch) {
+      updated = await this.localAdapter.updateExpensesBatch(
+        batch.map(item => ({
+          ...item,
+          updates: { ...item.updates, syncStatus: 'PENDING_SYNC' },
+        }))
+      );
+    } else {
+      updated = [];
+      for (const item of batch) {
+        updated.push(
+          await this.localAdapter.updateExpense(item.id, {
+            ...item.updates,
+            syncStatus: 'PENDING_SYNC',
+          })
+        );
+      }
+    }
+
+    if (typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {
+      try {
+        await this.flushPendingExpenses();
+      } catch (err) {
+        console.warn('Background update expenses batch sync failed:', err);
+      }
+    }
+
+    return updated;
+  }
+
   async deleteExpense(id: string): Promise<void> {
     await this.localAdapter.deleteExpense(id);
 
@@ -403,6 +525,12 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
       } catch (err) {
         console.warn('Failed to delete expense on cloud:', err);
       }
+    }
+  }
+
+  async clearAllExpenses(): Promise<void> {
+    if (this.localAdapter.clearAllExpenses) {
+      await this.localAdapter.clearAllExpenses();
     }
   }
 
@@ -536,8 +664,18 @@ export class AwsCloudStorageAdapter implements StorageAdapter {
   }
 
   async importArchive(archive: FullHouseholdArchive): Promise<void> {
-    // 1. Ingest into local IndexedDB
-    await this.localAdapter.importArchive(archive);
+    // 1. Ingest into local IndexedDB (rebalancing data goes through its own cloud-aware storage)
+    const { rebalancingAccounts, rebalancingSnapshots, ...coreArchive } = archive;
+    await this.localAdapter.importArchive(coreArchive);
+    if (rebalancingAccounts && rebalancingAccounts.length > 0) {
+      const report = await new CloudRebalancingStorage().importRebalancing(
+        rebalancingAccounts,
+        rebalancingSnapshots || []
+      );
+      if (report.skippedAccounts.length > 0) {
+        console.warn('Rebalancing import skipped existing accounts:', report.skippedAccounts.join(', '));
+      }
+    }
 
     // 2. If authenticated, push categories and expenses to Cloud DynamoDB
     if (typeof window !== 'undefined' && navigator.onLine && AuthService.isAuthenticated()) {

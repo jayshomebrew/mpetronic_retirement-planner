@@ -1,4 +1,4 @@
-import { ExpenseCategory, StorageAdapter } from '../types/expenses';
+import { ExpenseCategory, StorageAdapter, ActualExpense } from '../types/expenses';
 import { normalizeDetailedExpenses, ExpenseItemDefinition, DetailedExpensesState } from '../../types';
 
 export interface PlannerExpenseLineItem {
@@ -462,6 +462,21 @@ export function mergeWithCustomCategories(
   return result;
 }
 
+function getLivePlannerItemIds(): Set<string> {
+  const ids = new Set<string>();
+  if (typeof window === 'undefined') return ids;
+  try {
+    const raw = window.localStorage.getItem('retirement_planner_inputs');
+    if (raw) {
+      const live = normalizeDetailedExpenses(JSON.parse(raw).detailedExpenses);
+      live.catalog.items.forEach(i => ids.add(i.id));
+    }
+  } catch {
+    // ignore
+  }
+  return ids;
+}
+
 export async function syncPlannerCatalogToCloudStorage(
   detailedExpenses: DetailedExpensesState | null | undefined,
   adapter: StorageAdapter,
@@ -519,6 +534,15 @@ export async function syncPlannerCatalogToCloudStorage(
   const allowedCategoriesSet = new Set((norm.catalog.categories || []).map(c => c.trim().toLowerCase()));
   const validActiveItemIds = new Set<string>();
 
+  // Keep the custom flag the item already has in storage; downgrading it would make a
+  // user-created item look like an obsolete planner item to any other device's cleanup.
+  let existingCustomIds = new Set<string>();
+  try {
+    existingCustomIds = new Set((await adapter.getCategories()).filter(c => c.isCustom).map(c => c.id));
+  } catch {
+    // treat as none custom
+  }
+
   for (const item of norm.catalog.items) {
     // Check state applicability so only items valid for current residency are active
     const applies = !item.applicableStates || 
@@ -546,7 +570,7 @@ export async function syncPlannerCatalogToCloudStorage(
         plannedMonthlyDefault: Math.round(monthlyCost),
         color: GROUP_COLORS[group] || '#6366f1',
         icon: 'Tag',
-        isCustom: false,
+        isCustom: existingCustomIds.has(item.id),
       });
     } catch (err) {
       console.warn(`Failed to sync category ${item.name} to cloud:`, err);
@@ -556,6 +580,9 @@ export async function syncPlannerCatalogToCloudStorage(
   // Remove any obsolete, state-inapplicable, or purged categories from storage
   try {
     const existingStorageCats = await adapter.getCategories();
+    // The plan passed in may be stale if another sync ran meanwhile, so never delete an item
+    // that the live plan in localStorage still contains.
+    const liveItemIds = getLivePlannerItemIds();
     for (const cat of existingStorageCats) {
       if (cat.id === '__household_profiles__') continue;
       if (cat.id === 'healthcare-oop' || cat.id === 'healthcare-premiums' || cat.id === 'healthcare-irmaa') continue;
@@ -568,7 +595,7 @@ export async function syncPlannerCatalogToCloudStorage(
 
       // Keep if it is an active valid line item for the current state,
       // or if it is a custom item whose group category still exists in detailedExpenses
-      const shouldKeep = validActiveItemIds.has(cat.id) || (Boolean(cat.isCustom) && isGroupValid);
+      const shouldKeep = validActiveItemIds.has(cat.id) || liveItemIds.has(cat.id) || (Boolean(cat.isCustom) && isGroupValid);
 
       if (!shouldKeep && adapter.deleteCategory) {
         await adapter.deleteCategory(cat.id);
@@ -578,3 +605,75 @@ export async function syncPlannerCatalogToCloudStorage(
     console.warn('Failed to clean up deleted categories in storage:', err);
   }
 }
+
+/**
+ * Resolves the Category and Line Item of an ActualExpense by prioritizing the planner catalog.
+ * If the expense maps to an item in the planner catalog (by ID or line item name), the catalog's
+ * current category is returned, ensuring alignment with the budget variance worksheet.
+ */
+export function resolveExpenseCategoryAndLineItem(
+  exp: ActualExpense,
+  catalogItems: PlannerExpenseLineItem[] = []
+): { category: string; lineItem: string } {
+  const targetId = exp.catalogId || exp.categoryId;
+  // 1. Try matching by catalog item ID
+  if (targetId && catalogItems.length > 0) {
+    const byId = catalogItems.find(
+      (c) => c.id === targetId || c.id.toLowerCase() === targetId.toLowerCase()
+    );
+    if (byId) {
+      return {
+        category: byId.groupCategory,
+        lineItem: byId.name,
+      };
+    }
+  }
+
+  // 2. Direct first-class attributes on exp
+  if (exp.category && exp.name) {
+    if (catalogItems.length > 0) {
+      const byName = catalogItems.find(
+        (c) => c.name.toLowerCase() === exp.name.toLowerCase()
+      );
+      if (byName) {
+        return {
+          category: byName.groupCategory,
+          lineItem: byName.name,
+        };
+      }
+    }
+    return {
+      category: exp.category,
+      lineItem: exp.name,
+    };
+  }
+
+  // Extract raw category and line item candidate from categoryName
+  let rawCategory = exp.category || 'Living';
+  let rawLineItem = exp.name || (exp.categoryName ? exp.categoryName.trim() : 'General');
+  if (exp.categoryName && exp.categoryName.includes(' - ')) {
+    const parts = exp.categoryName.split(' - ');
+    rawCategory = parts[0].trim();
+    rawLineItem = parts.slice(1).join(' - ').trim();
+  }
+
+  // 3. Try matching catalog item by line item name
+  if (catalogItems.length > 0 && rawLineItem) {
+    const byName = catalogItems.find(
+      (c) => c.name.toLowerCase() === rawLineItem.toLowerCase()
+    );
+    if (byName) {
+      return {
+        category: byName.groupCategory,
+        lineItem: byName.name,
+      };
+    }
+  }
+
+  // 3. Fallback to raw parsed values
+  return {
+    category: rawCategory,
+    lineItem: rawLineItem,
+  };
+}
+

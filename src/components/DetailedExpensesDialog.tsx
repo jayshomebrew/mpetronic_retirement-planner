@@ -29,6 +29,7 @@ import {
   ExpenseCatalog,
   ExpenseItemDefinition,
   HealthcareConfig,
+  StateHealthcareConfig,
   normalizeDetailedExpenses
 } from '../types';
 import { BASE_MEDICARE_PART_B, BASE_MEDICARE_PART_D } from '../engine/taxRates2026';
@@ -633,8 +634,8 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
   const activeHealthcareSummary = useMemo(() => {
     if (!youHealthcare && !wifeHealthcare) return null;
 
-    const youStateHc = youHealthcare ? ((youHealthcare as unknown as Record<string, unknown>)[activeState] as HealthcareConfig['MD'] | undefined || (activeState === 'MD' ? youHealthcare.MD : youHealthcare.FL)) : undefined;
-    const wifeStateHc = wifeHealthcare ? ((wifeHealthcare as unknown as Record<string, unknown>)[activeState] as HealthcareConfig['MD'] | undefined || (activeState === 'MD' ? wifeHealthcare.MD : wifeHealthcare.FL)) : undefined;
+    const youStateHc = youHealthcare ? ((youHealthcare as unknown as Record<string, unknown>)[activeState] as StateHealthcareConfig | undefined) : undefined;
+    const wifeStateHc = wifeHealthcare ? ((wifeHealthcare as unknown as Record<string, unknown>)[activeState] as StateHealthcareConfig | undefined) : undefined;
 
     // Pre-65 monthly & annual
     const youPre65Monthly = (youStateHc?.pre65MedicalPremium ?? 0) + (youStateHc?.pre65DentalPremium ?? 0) + (youStateHc?.pre65VisionPremium ?? 0);
@@ -1420,12 +1421,16 @@ export const DetailedExpensesDialog: React.FC<DetailedExpensesDialogProps> = ({
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
                   {catalog.categories.map((cat) => {
-                    const count = catalog.items.filter((i) => i.category === cat).length;
+                    const catAllItems = catalog.items.filter((i) => i.category === cat);
+                    const count = catAllItems.length;
+                    const listedCount = catAllItems.filter(
+                      (i) => !i.isOneTime && (!i.applicableStates || i.applicableStates.includes('ALL') || i.applicableStates.includes(activeState))
+                    ).length;
                     return (
                       <div key={cat} className="flex items-center justify-between p-3 bg-slate-900 rounded-lg border border-slate-800">
                         <div>
                           <span className="font-bold text-xs text-slate-200">{cat}</span>
-                          <span className="block text-[10px] text-slate-500">{count} items mapped</span>
+                          <span className="block text-[10px] text-slate-500">{count} items mapped{listedCount !== count && ` (${listedCount} recurring in ${activeState})`}</span>
                         </div>
                         <div className="flex items-center gap-1">
                           <button

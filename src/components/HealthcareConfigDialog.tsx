@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Check, HelpCircle, Shield, Heart, Calendar, CalendarCheck } from 'lucide-react';
 import { HealthcareConfig, StateHealthcareConfig } from '../types';
+import { getStateTaxProfile } from '../engine/stateTaxRegistry';
 
 interface HealthcareConfigDialogProps {
   isOpen: boolean;
@@ -10,6 +11,9 @@ interface HealthcareConfigDialogProps {
   birthDate: string;
   healthcareConfig: HealthcareConfig | undefined;
   healthcareInflationRate: number;
+  currentState: string;
+  targetState?: string | null;
+  relocationYear?: number | null;
   startYear?: number;
   onSave: (config: HealthcareConfig) => void;
 }
@@ -25,10 +29,25 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
   birthDate,
   healthcareConfig,
   healthcareInflationRate,
+  currentState,
+  targetState = null,
+  relocationYear = null,
   startYear = 2026,
   onSave,
 }) => {
-  const [activeTab, setActiveTab] = useState<'MD' | 'FL'>('MD');
+  const hasRelocation = relocationYear !== null && Boolean(targetState) && targetState !== currentState;
+  const currentProfile = getStateTaxProfile(currentState);
+  const targetProfile = targetState ? getStateTaxProfile(targetState) : null;
+
+  const [activeTab, setActiveTab] = useState<string>(currentState);
+
+  useEffect(() => {
+    if (!hasRelocation) {
+      setActiveTab(currentState);
+    } else if (activeTab !== currentState && activeTab !== targetState) {
+      setActiveTab(currentState);
+    }
+  }, [currentState, targetState, hasRelocation, activeTab]);
 
   // Compute birth year and age 65 year for projections
   const birthYear = useMemo(() => {
@@ -96,22 +115,34 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
     return healthcareConfig?.medicareStartDate ?? '';
   });
 
-  const [mdConfig, setMdConfig] = useState<StateHealthcareConfig>(() => {
-    return healthcareConfig?.MD ? { ...healthcareConfig.MD } : createDefaultStateConfig();
-  });
+  const getStateInitialConfig = (st: string): StateHealthcareConfig => {
+    const raw = (healthcareConfig || {}) as Record<string, unknown>;
+    if (raw[st] && typeof raw[st] === 'object' && !Array.isArray(raw[st])) {
+      return { ...(raw[st] as StateHealthcareConfig) };
+    }
+    return createDefaultStateConfig();
+  };
 
-  const [flConfig, setFlConfig] = useState<StateHealthcareConfig>(() => {
-    return healthcareConfig?.FL ? { ...healthcareConfig.FL } : createDefaultStateConfig();
+  const [stateConfigs, setStateConfigs] = useState<Record<string, StateHealthcareConfig>>(() => {
+    const configs: Record<string, StateHealthcareConfig> = {};
+    const states = [currentState];
+    if (hasRelocation && targetState) states.push(targetState);
+    for (const st of states) {
+      configs[st] = getStateInitialConfig(st);
+    }
+    return configs;
   });
 
   if (!isOpen) return null;
 
-  const handleStateChange = (state: 'MD' | 'FL', key: keyof StateHealthcareConfig, value: number | null) => {
-    if (state === 'MD') {
-      setMdConfig(prev => ({ ...prev, [key]: value }));
-    } else {
-      setFlConfig(prev => ({ ...prev, [key]: value }));
-    }
+  const handleStateChange = (state: string, key: keyof StateHealthcareConfig, value: number | null) => {
+    setStateConfigs(prev => ({
+      ...prev,
+      [state]: {
+        ...(prev[state] || createDefaultStateConfig()),
+        [key]: value
+      }
+    }));
   };
 
   const handleSave = () => {
@@ -121,8 +152,8 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
       medicareStartMode,
       medicareStartDate: medicareStartMode === 'customDate' ? (medicareStartDate || null) : null,
       coveredByWorkingSpousePlan,
-      MD: mdConfig,
-      FL: flConfig
+      ...(healthcareConfig || {}),
+      ...stateConfigs,
     });
     onClose();
   };
@@ -135,8 +166,8 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
     }).format(val);
   };
 
-  const renderStateInputs = (state: 'MD' | 'FL') => {
-    const config = state === 'MD' ? mdConfig : flConfig;
+  const renderStateInputs = (state: string) => {
+    const config = stateConfigs[state] || createDefaultStateConfig();
     const updateField = (key: keyof StateHealthcareConfig, valString: string) => {
       const val = valString === '' ? null : Number(valString);
       handleStateChange(state, key, val);
@@ -627,30 +658,38 @@ export const HealthcareConfigDialog: React.FC<HealthcareConfigDialogProps> = ({
 
           {/* State Tabs */}
           <div className="space-y-4">
-            <div className="flex border-b border-slate-800">
-              <button
-                type="button"
-                onClick={() => setActiveTab('MD')}
-                className={`px-4 py-2 text-xs font-bold transition-all border-b-2 -mb-px ${
-                  activeTab === 'MD'
-                    ? 'border-emerald-500 text-emerald-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Maryland (MD) Healthcare
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('FL')}
-                className={`px-4 py-2 text-xs font-bold transition-all border-b-2 -mb-px ${
-                  activeTab === 'FL'
-                    ? 'border-emerald-500 text-emerald-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Florida (FL) Healthcare
-              </button>
-            </div>
+            {hasRelocation && targetState ? (
+              <div className="flex border-b border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(currentState)}
+                  className={`px-4 py-2 text-xs font-bold transition-all border-b-2 -mb-px cursor-pointer ${
+                    activeTab === currentState
+                      ? 'border-emerald-500 text-emerald-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {currentProfile?.name || currentState} ({currentState}) Healthcare (Current)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (targetState) setActiveTab(targetState);
+                  }}
+                  className={`px-4 py-2 text-xs font-bold transition-all border-b-2 -mb-px cursor-pointer ${
+                    activeTab === targetState
+                      ? 'border-emerald-500 text-emerald-400'
+                      : 'border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {targetProfile?.name || targetState} ({targetState}) Healthcare (Target)
+                </button>
+              </div>
+            ) : (
+              <div className="flex border-b border-slate-800 px-4 py-2 text-xs font-bold text-emerald-400">
+                {currentProfile?.name || currentState} ({currentState}) Healthcare (Continuous Residency)
+              </div>
+            )}
 
             <div className="p-1">
               {renderStateInputs(activeTab)}

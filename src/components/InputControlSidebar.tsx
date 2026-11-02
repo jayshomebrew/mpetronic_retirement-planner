@@ -25,6 +25,7 @@ import {
 import { SAMPLE_DEMO_PLAN } from '../shared/utils/sampleDemoPlan';
 import { DetailedExpensesDialog } from './DetailedExpensesDialog';
 import { HealthcareConfigDialog } from './HealthcareConfigDialog';
+import { getStateTaxProfile } from '../engine/stateTaxRegistry';
 import { CharityControlPanel } from './CharityControlPanel';
 import { ExportPlanDialog } from './ExportPlanDialog';
 import { ExportFormatType } from '../utils/exportHelpers';
@@ -1187,14 +1188,16 @@ export const InputControlSidebar: React.FC<InputControlSidebarProps> = ({
                     </button>
                     
                     <div className="p-3 bg-slate-900/60 border border-slate-800/80 rounded-xl space-y-2 text-[10px] text-slate-400 leading-normal">
-                      <div className="flex justify-between border-b border-slate-800 pb-1">
-                        <span className="font-semibold">Maryland (MD) Cost:</span>
+                      <div className={`flex justify-between ${inputs.jurisdiction.relocationYear !== null && inputs.jurisdiction.targetState !== inputs.jurisdiction.currentState ? 'border-b border-slate-800 pb-1' : ''}`}>
+                        <span className="font-semibold">{getStateTaxProfile(inputs.jurisdiction.currentState)?.name || inputs.jurisdiction.currentState} ({inputs.jurisdiction.currentState}) Cost:</span>
                         <span className="text-slate-200 font-mono font-bold">{formatCurrency(mdMonthlySum * 12)}/yr</span>
                       </div>
-                      <div className="flex justify-between">
-                        <span className="font-semibold">Florida (FL) Cost:</span>
-                        <span className="text-slate-200 font-mono font-bold">{formatCurrency(flMonthlySum * 12)}/yr</span>
-                      </div>
+                      {inputs.jurisdiction.relocationYear !== null && inputs.jurisdiction.targetState !== inputs.jurisdiction.currentState && (
+                        <div className="flex justify-between">
+                          <span className="font-semibold">{getStateTaxProfile(inputs.jurisdiction.targetState)?.name || inputs.jurisdiction.targetState} ({inputs.jurisdiction.targetState}) Cost:</span>
+                          <span className="text-slate-200 font-mono font-bold">{formatCurrency(flMonthlySum * 12)}/yr</span>
+                        </div>
+                      )}
                     </div>
                     <p className="text-[10px] text-slate-400 leading-normal">
                       Annual living expenses are calculated as the sum of all itemized recurring expenses for the active state in any simulated year, inflated using CPI.
@@ -1386,6 +1389,9 @@ export const InputControlSidebar: React.FC<InputControlSidebarProps> = ({
           birthDate={editingHealthcarePerson === 'you' ? inputs.you.birthDate : inputs.wife.birthDate}
           healthcareConfig={editingHealthcarePerson === 'you' ? inputs.you.healthcare : inputs.wife.healthcare}
           healthcareInflationRate={inputs.growthAssumptions.healthcareInflationRate}
+          currentState={inputs.jurisdiction.currentState}
+          targetState={inputs.jurisdiction.targetState}
+          relocationYear={inputs.jurisdiction.relocationYear}
           startYear={simStartYear}
           onSave={(config) => updateNestedState(editingHealthcarePerson, 'healthcare', config)}
         />

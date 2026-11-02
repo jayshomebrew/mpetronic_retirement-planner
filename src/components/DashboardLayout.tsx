@@ -50,6 +50,7 @@ const VIEW_TITLES: Record<ActiveViewType, { title: string; category?: string }> 
   compare: { title: 'Plan Scenario Comparison', category: 'Workspaces' },
   actuals: { title: 'Actuals & Guardrails Governance', category: 'Workspaces' },
   'bucket-management': { title: '3-Bucket Strategy Management', category: 'Workspaces' },
+  rebalancing: { title: 'Account Rebalancing', category: 'Workspaces' },
   'params-profiles': { title: 'Profiles & Family', category: 'Edit Parameters' },
   'params-filing-status': { title: 'Tax Filing Status', category: 'Edit Parameters' },
   'params-residency': { title: 'Tax Residency & States', category: 'Edit Parameters' },

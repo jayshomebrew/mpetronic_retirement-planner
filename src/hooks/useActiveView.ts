@@ -9,6 +9,7 @@ export const VALID_VIEWS: Set<ActiveViewType> = new Set([
   'compare',
   'actuals',
   'bucket-management',
+  'rebalancing',
   'params-profiles',
   'params-filing-status',
   'params-residency',

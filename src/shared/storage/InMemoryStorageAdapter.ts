@@ -1,4 +1,4 @@
-import { ActualExpense, ExpenseCategory, FullHouseholdArchive, StorageAdapter, SyncStatus } from '../types/expenses';
+import { ActualExpense, ExpenseCategory, FullHouseholdArchive, NewExpenseInput, StorageAdapter } from '../types/expenses';
 import { DEFAULT_EXPENSE_CATEGORIES } from './defaultCategories';
 
 export class InMemoryStorageAdapter implements StorageAdapter {
@@ -70,18 +70,25 @@ export class InMemoryStorageAdapter implements StorageAdapter {
     return found || null;
   }
 
-  async saveExpense(
-    expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-      expenseId?: string;
-      createdAt?: string;
-      updatedAt?: string;
-      syncStatus?: SyncStatus;
-    }
-  ): Promise<ActualExpense> {
+  async saveExpense(expense: NewExpenseInput): Promise<ActualExpense> {
     const now = new Date().toISOString();
     const expenseId = expense.expenseId || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    let category = expense.category;
+    let name = expense.name;
+    if (!category && expense.categoryName) {
+      const parts = String(expense.categoryName).split(' - ');
+      category = parts[0] || 'Uncategorized';
+      name = parts.slice(1).join(' - ') || expense.categoryName;
+    }
+    const catalogId = expense.catalogId || expense.categoryId || 'uncategorized';
+
     const newRecord: ActualExpense = {
       ...expense,
+      catalogId,
+      category: category || 'Uncategorized',
+      name: name || 'Expense',
+      categoryId: catalogId,
+      categoryName: expense.categoryName || `${category || 'Uncategorized'} - ${name || 'Expense'}`,
       expenseId,
       syncStatus: expense.syncStatus || 'PENDING_SYNC',
       createdAt: expense.createdAt || now,
@@ -97,16 +104,7 @@ export class InMemoryStorageAdapter implements StorageAdapter {
     return newRecord;
   }
 
-  async saveExpensesBatch(
-    expenses: Array<
-      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-        expenseId?: string;
-        createdAt?: string;
-        updatedAt?: string;
-        syncStatus?: SyncStatus;
-      }
-    >
-  ): Promise<ActualExpense[]> {
+  async saveExpensesBatch(expenses: NewExpenseInput[]): Promise<ActualExpense[]> {
     const results: ActualExpense[] = [];
     for (const exp of expenses) {
       results.push(await this.saveExpense(exp));
@@ -116,16 +114,28 @@ export class InMemoryStorageAdapter implements StorageAdapter {
 
   async updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense> {
     const index = this.expenses.findIndex(e => e.expenseId === id);
-    if (index === 0 && this.expenses.length === 0) {
-      throw new Error(`Expense ${id} not found`);
-    }
     if (index === -1) {
       throw new Error(`Expense ${id} not found`);
     }
 
-    const updated = {
-      ...this.expenses[index],
+    const current = this.expenses[index];
+    let category = updates.category !== undefined ? updates.category : current.category;
+    let name = updates.name !== undefined ? updates.name : current.name;
+    if (!category && updates.categoryName) {
+      const parts = String(updates.categoryName).split(' - ');
+      category = parts[0] || 'Uncategorized';
+      name = parts.slice(1).join(' - ') || updates.categoryName;
+    }
+    const catalogId = updates.catalogId || updates.categoryId || current.catalogId || current.categoryId || 'uncategorized';
+
+    const updated: ActualExpense = {
+      ...current,
       ...updates,
+      catalogId,
+      category: category || 'Uncategorized',
+      name: name || 'Expense',
+      categoryId: catalogId,
+      categoryName: updates.categoryName || `${category || 'Uncategorized'} - ${name || 'Expense'}`,
       updatedAt: new Date().toISOString(),
     };
 
@@ -133,8 +143,22 @@ export class InMemoryStorageAdapter implements StorageAdapter {
     return updated;
   }
 
+  async updateExpensesBatch(
+    batch: Array<{ id: string; updates: Partial<ActualExpense> }>
+  ): Promise<ActualExpense[]> {
+    const results: ActualExpense[] = [];
+    for (const item of batch) {
+      results.push(await this.updateExpense(item.id, item.updates));
+    }
+    return results;
+  }
+
   async deleteExpense(id: string): Promise<void> {
     this.expenses = this.expenses.filter(e => e.expenseId !== id);
+  }
+
+  async clearAllExpenses(): Promise<void> {
+    this.expenses = [];
   }
 
   async getPendingSyncExpenses(): Promise<ActualExpense[]> {

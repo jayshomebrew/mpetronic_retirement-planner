@@ -6,4 +6,4 @@ trigger: always_on
 
 - Always run a linter to check for warnings after making code changes
 
-- Never you magic numbers in code for any stuatory values related to tax codes or thresholds. Define them using constants that convey the meaning of the value.
+- Never use magic numbers in code for any stuatory values related to tax codes or thresholds. Define them using constants that convey the meaning of the value.

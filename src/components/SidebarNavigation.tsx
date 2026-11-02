@@ -26,6 +26,7 @@ import {
   HeartHandshake,
   Smartphone,
   Cloud,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { getVersionInfo } from '../utils/version';
 
@@ -37,6 +38,7 @@ export type ActiveViewType =
   | 'compare'
   | 'actuals'
   | 'bucket-management'
+  | 'rebalancing'
   | 'params-profiles'
   | 'params-filing-status'
   | 'params-residency'
@@ -105,6 +107,13 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     shortLabel: 'Buckets',
     icon: Layers,
     description: '3-Bucket strategy & bond ladder',
+  },
+  {
+    id: 'rebalancing',
+    label: 'Account Rebalancing',
+    shortLabel: 'Rebalance',
+    icon: ArrowLeftRight,
+    description: 'Fund targets & rebalance trades',
   },
 ];
 

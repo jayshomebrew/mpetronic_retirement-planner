@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   SimulationResultRow,
   AppStateInputs,
@@ -40,7 +40,6 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowRight,
-  BarChart3,
   Table,
   EyeOff,
   Upload,
@@ -56,11 +55,47 @@ import { ActiveViewType } from './SidebarNavigation';
 import { RangeSlider } from './RangeSlider';
 import { NumericInput } from './NumericInput';
 import { Chart } from 'react-chartjs-2';
-import { Chart as ChartJS, registerables, ChartEvent, LegendItem } from 'chart.js';
+import { Chart as ChartJS, registerables } from 'chart.js';
 import { ImportExpensesModal } from './ImportExpensesModal';
+import { BulkEditExpensesModal } from './BulkEditExpensesModal';
+import { BudgetTrackerChart } from './BudgetTrackerChart';
+import { MONTHS_PER_YEAR, computeBudgetTracker } from '../utils/budgetTracker';
 import { CloudAuthModal } from './CloudAuthModal';
 
 ChartJS.register(...registerables);
+
+type CatalogItem = ReturnType<typeof normalizeDetailedExpenses>['catalog']['items'][number];
+
+
+// Spreads one catalog item's budget over 12 months, honoring explicit due months (e.g. property taxes)
+const getItemMonthlySchedule = (item: CatalogItem, cost: number, freq: number): number[] => {
+  const schedule: number[] = Array(MONTHS_PER_YEAR).fill(0);
+  if (freq === MONTHS_PER_YEAR && !item.isOneTime) {
+    schedule.fill(cost);
+  } else if (item.dueMonths && item.dueMonths.length > 0) {
+    item.dueMonths.forEach((mNum) => {
+      if (mNum >= 1 && mNum <= MONTHS_PER_YEAR) {
+        schedule[mNum - 1] += cost;
+      }
+    });
+  } else {
+    const annualTotal = item.isOneTime ? cost : cost * freq;
+    schedule.fill(annualTotal / MONTHS_PER_YEAR);
+  }
+  return schedule;
+};
+
+type ComparisonSortField = 'name' | 'planned' | 'actual' | 'variance' | 'usage' | 'payers' | 'logs';
+
+const COMPARISON_COLUMNS: Array<{ field: ComparisonSortField; label: string; align: string; defaultDirection: 'asc' | 'desc' }> = [
+  { field: 'name', label: 'Expense Name / Category', align: '', defaultDirection: 'asc' },
+  { field: 'planned', label: 'Planned Budget', align: 'text-right', defaultDirection: 'desc' },
+  { field: 'actual', label: 'Actual Spend', align: 'text-right', defaultDirection: 'desc' },
+  { field: 'variance', label: 'Variance', align: 'text-right', defaultDirection: 'asc' },
+  { field: 'usage', label: 'Budget Usage', align: '', defaultDirection: 'desc' },
+  { field: 'payers', label: 'Payer Breakdown', align: '', defaultDirection: 'asc' },
+  { field: 'logs', label: 'Actuals', align: 'text-center', defaultDirection: 'desc' },
+];
 
 interface ActualsWorkspaceProps {
   ledger: SimulationResultRow[];
@@ -115,14 +150,15 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   const [allYearLoggedExpenses, setAllYearLoggedExpenses] = useState<ActualExpense[]>([]);
   const [isLoadingExpenses, setIsLoadingExpenses] = useState<boolean>(false);
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<number | null>(null);
-  const [expensesDisplayMode, setExpensesDisplayMode] = useState<'table' | 'chart' | 'none'>('table');
-  const [chartAggregationMode, setChartAggregationMode] = useState<'monthly' | 'cumulative'>('monthly');
+  const [expensesDisplayMode, setExpensesDisplayMode] = useState<'table' | 'tracker' | 'none'>('table');
+  const [trackerCategory, setTrackerCategory] = useState<string | null>(null);
   const [tableFilterText, setTableFilterText] = useState<string>('');
+  const [comparisonSortField, setComparisonSortField] = useState<ComparisonSortField | null>('actual');
+  const [comparisonSortDirection, setComparisonSortDirection] = useState<'asc' | 'desc'>('desc');
   const [showTransactionsDrawer, setShowTransactionsDrawer] = useState<boolean>(false);
   const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  const [showBulkEditModal, setShowBulkEditModal] = useState<boolean>(false);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => AuthService.isAuthenticated());
-  const monthlyExpensesChartRef = useRef<ChartJS<'bar' | 'line'> | null>(null);
-  const [hasHiddenExpensesDatasets, setHasHiddenExpensesDatasets] = useState(false);
 
   useEffect(() => {
     const unsub = AuthService.subscribe((s) => {
@@ -165,9 +201,10 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   } | null>(null);
 
   // Breakdown modal filter and sort state
+  const [breakdownViewMode, setBreakdownViewMode] = useState<'table' | 'tracker'>('table');
   const [breakdownFilterText, setBreakdownFilterText] = useState<string>('');
   const [breakdownPayerFilter, setBreakdownPayerFilter] = useState<string>('ALL');
-  const [breakdownSortField, setBreakdownSortField] = useState<'date' | 'amount' | 'enteredBy'>('date');
+  const [breakdownSortField, setBreakdownSortField] = useState<'date' | 'amount' | 'enteredBy' | 'notes'>('date');
   const [breakdownSortDirection, setBreakdownSortDirection] = useState<'asc' | 'desc'>('desc');
 
   // Breakdown modal editing state
@@ -209,14 +246,12 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
       // 2. Also register any line items from logged transactions if missing from catalog
       for (const exp of allExps) {
-        if (!exp.categoryName) continue;
-        const parts = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ') : ['Living', exp.categoryName];
-        const group = parts[0].trim();
-        const name = parts[1] ? parts[1].trim() : exp.categoryName.trim();
+        const group = exp.category || (exp.categoryName && exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : 'Living');
+        const name = exp.name || (exp.categoryName && exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ').slice(1).join(' - ').trim() : exp.categoryName || 'Expense');
         if (group === 'Healthcare') continue;
 
         savePlannerExpenseLineItem({
-          id: exp.categoryId,
+          id: exp.catalogId || exp.categoryId,
           name,
           groupCategory: group,
           plannedMonthlyDefault: 0,
@@ -265,21 +300,28 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
     for (const exp of loggedExpenses) {
       totalSpend += exp.amount;
-      byCategory[exp.categoryName] = (byCategory[exp.categoryName] || 0) + exp.amount;
+      const group = exp.category || (exp.categoryName && exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName || 'Uncategorized');
+      const itemName = exp.name || (exp.categoryName && exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ').slice(1).join(' - ').trim() : exp.categoryName || 'Expense');
+      const keyId = exp.catalogId || exp.categoryId || `cat_${group}_${itemName}`;
 
-      if (!byLineItem[exp.categoryId]) {
-        byLineItem[exp.categoryId] = {
+      byCategory[group] = (byCategory[group] || 0) + exp.amount;
+      if (exp.categoryName) {
+        byCategory[exp.categoryName] = (byCategory[exp.categoryName] || 0) + exp.amount;
+      }
+
+      if (!byLineItem[keyId]) {
+        byLineItem[keyId] = {
           total: 0,
           count: 0,
-          name: exp.categoryName,
-          categoryName: exp.categoryName,
+          name: itemName,
+          categoryName: `${group} - ${itemName}`,
           payers: {},
         };
       }
-      byLineItem[exp.categoryId].total += exp.amount;
-      byLineItem[exp.categoryId].count += 1;
+      byLineItem[keyId].total += exp.amount;
+      byLineItem[keyId].count += 1;
       const payer = exp.enteredBy || 'Primary';
-      byLineItem[exp.categoryId].payers[payer] = (byLineItem[exp.categoryId].payers[payer] || 0) + exp.amount;
+      byLineItem[keyId].payers[payer] = (byLineItem[keyId].payers[payer] || 0) + exp.amount;
       byPayer[payer] = (byPayer[payer] || 0) + exp.amount;
     }
 
@@ -300,20 +342,23 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
   };
 
   // Active line item expenses matching the selected category/line item
-  const activeLineItemExpenses = useMemo(() => {
-    if (!selectedLineItemForBreakdown) return [];
+  const matchesSelectedLineItem = useCallback((e: ActualExpense) => {
+    if (!selectedLineItemForBreakdown) return false;
     const targetId = selectedLineItemForBreakdown.id;
     const targetNameLower = selectedLineItemForBreakdown.name.toLowerCase();
+    if ((e.catalogId && e.catalogId === targetId) || (e.categoryId && e.categoryId === targetId)) return true;
+    if (e.name && e.name.toLowerCase() === targetNameLower) return true;
+    const catLower = (e.categoryName || '').toLowerCase();
+    if (catLower === targetNameLower) return true;
+    if (catLower.endsWith(` - ${targetNameLower}`)) return true;
+    if (catLower.endsWith(targetNameLower)) return true;
+    return false;
+  }, [selectedLineItemForBreakdown]);
 
-    return loggedExpenses.filter(e => {
-      if (e.categoryId === targetId) return true;
-      const catLower = e.categoryName.toLowerCase();
-      if (catLower === targetNameLower) return true;
-      if (catLower.endsWith(` - ${targetNameLower}`)) return true;
-      if (catLower.endsWith(targetNameLower)) return true;
-      return false;
-    });
-  }, [selectedLineItemForBreakdown, loggedExpenses]);
+  const activeLineItemExpenses = useMemo(
+    () => loggedExpenses.filter(matchesSelectedLineItem),
+    [loggedExpenses, matchesSelectedLineItem]
+  );
 
   // Unique payers for the active line item breakdown
   const availableBreakdownPayers = useMemo(() => {
@@ -323,6 +368,47 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     }
     return Array.from(payersSet);
   }, [activeLineItemExpenses]);
+
+  // Reset to the transaction table whenever a different expense name is opened
+  useEffect(() => {
+    setBreakdownViewMode('table');
+  }, [selectedLineItemForBreakdown?.id]);
+
+  // Per-month actual and budget series for the selected expense name, full year
+  const lineItemMonthlySeries = useMemo(() => {
+    if (!selectedLineItemForBreakdown) return null;
+
+    const monthlyActual: number[] = Array(MONTHS_PER_YEAR).fill(0);
+    allYearLoggedExpenses.filter(matchesSelectedLineItem).forEach((exp) => {
+      if (!exp.date) return;
+      const m = parseInt(exp.date.split('-')[1], 10);
+      if (m >= 1 && m <= MONTHS_PER_YEAR) {
+        monthlyActual[m - 1] += exp.amount || 0;
+      }
+    });
+
+    let monthlyBudget: number[] | null = null;
+    if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
+      const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
+      const catItem = norm.catalog.items.find((i) => i.id === selectedLineItemForBreakdown.id);
+      if (catItem) {
+        const activeStateForYear = (inputs.jurisdiction.relocationYear !== null && selectedYear >= inputs.jurisdiction.relocationYear)
+          ? inputs.jurisdiction.targetState
+          : inputs.jurisdiction.currentState;
+        const stateCosts = norm.costs[activeStateForYear] || norm.costs.ALL || norm.costs[inputs.jurisdiction.currentState] || {};
+        const cost = stateCosts[catItem.id] ?? 0;
+        const freq = norm.frequencies[catItem.id] ?? catItem.defaultFrequency ?? (catItem.isOneTime ? 1 : MONTHS_PER_YEAR);
+        monthlyBudget = getItemMonthlySchedule(catItem, cost, freq);
+      }
+    }
+    if (!monthlyBudget) {
+      // Non-catalog line items (e.g. healthcare): spread the annual plan evenly
+      const annualPlan = selectedMonthFilter ? selectedLineItemForBreakdown.plannedAnnual * MONTHS_PER_YEAR : selectedLineItemForBreakdown.plannedAnnual;
+      monthlyBudget = Array(MONTHS_PER_YEAR).fill(annualPlan / MONTHS_PER_YEAR);
+    }
+
+    return { monthlyActual, monthlyBudget };
+  }, [selectedLineItemForBreakdown, allYearLoggedExpenses, matchesSelectedLineItem, inputs.useDetailedExpenses, inputs.detailedExpenses, inputs.jurisdiction, selectedYear, selectedMonthFilter]);
 
   // Filtered and sorted expenses for the breakdown modal
   const filteredAndSortedLineItemExpenses = useMemo(() => {
@@ -356,6 +442,8 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
         const pA = a.enteredBy || 'Primary';
         const pB = b.enteredBy || 'Primary';
         comparison = pA.localeCompare(pB);
+      } else if (breakdownSortField === 'notes') {
+        comparison = (a.notes || '').localeCompare(b.notes || '');
       }
       return breakdownSortDirection === 'asc' ? comparison : -comparison;
     });
@@ -363,7 +451,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     return list;
   }, [activeLineItemExpenses, breakdownFilterText, breakdownPayerFilter, breakdownSortField, breakdownSortDirection]);
 
-  const handleToggleSort = (field: 'date' | 'amount' | 'enteredBy') => {
+  const handleToggleSort = (field: 'date' | 'amount' | 'enteredBy' | 'notes') => {
     if (breakdownSortField === field) {
       setBreakdownSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
     } else {
@@ -460,8 +548,8 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     let loggedIRMAA = 0;
 
     for (const exp of loggedExpenses) {
-      const catLower = exp.categoryName.toLowerCase();
-      const idLower = exp.categoryId.toLowerCase();
+      const catLower = (exp.categoryName || `${exp.category} ${exp.name}`).toLowerCase();
+      const idLower = (exp.catalogId || exp.categoryId || '').toLowerCase();
       if (
         idLower === 'healthcare-oop' ||
         catLower.includes('out-of-pocket') ||
@@ -484,7 +572,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       ) {
         loggedIRMAA += exp.amount;
       } else {
-        const group = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName;
+        const group = exp.category || (exp.categoryName && exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName || 'Uncategorized');
         nextCategories[group] = (nextCategories[group] || 0) + exp.amount;
         nonHealthcareSpend += exp.amount;
       }
@@ -810,10 +898,42 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     });
   }, [comparisonItems, tableFilterText]);
 
+  const sortedComparisonItems = useMemo(() => {
+    if (!comparisonSortField) return filteredComparisonItems;
+    const payerKey = (payers: Record<string, number>) => Object.keys(payers).sort().join(', ');
+    const sorted = [...filteredComparisonItems].sort((a, b) => {
+      switch (comparisonSortField) {
+        case 'name': return a.name.localeCompare(b.name) || a.group.localeCompare(b.group);
+        case 'planned': return a.plannedAnnual - b.plannedAnnual;
+        case 'actual': return a.actualAnnual - b.actualAnnual;
+        case 'variance': return a.variance - b.variance;
+        case 'usage': return a.percentUsed - b.percentUsed;
+        case 'payers': return payerKey(a.payers).localeCompare(payerKey(b.payers));
+        case 'logs': return a.transactionCount - b.transactionCount;
+      }
+    });
+    return comparisonSortDirection === 'asc' ? sorted : sorted.reverse();
+  }, [filteredComparisonItems, comparisonSortField, comparisonSortDirection]);
 
-  // Scheduled 12-month budget array accounting for periodic due months (e.g. Sep/Dec property taxes)
-  const scheduledMonthlyBudgets = useMemo(() => {
-    const monthlyBudgets = Array(12).fill(0);
+  const handleToggleComparisonSort = (field: ComparisonSortField, defaultDirection: 'asc' | 'desc') => {
+    if (comparisonSortField === field) {
+      setComparisonSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setComparisonSortField(field);
+      setComparisonSortDirection(defaultDirection);
+    }
+  };
+
+
+  // Scheduled 12-month budget arrays by category, accounting for periodic due months (e.g. Sep/Dec property taxes)
+  const scheduledBudgetsByCategory = useMemo(() => {
+    const byCategory: Record<string, number[]> = {};
+    const addBudget = (category: string, amounts: number[]) => {
+      if (!byCategory[category]) byCategory[category] = Array(MONTHS_PER_YEAR).fill(0);
+      amounts.forEach((amt, m) => {
+        byCategory[category][m] += amt;
+      });
+    };
 
     if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
       const norm = normalizeDetailedExpenses(inputs.detailedExpenses);
@@ -834,33 +954,11 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
         const cost = stateCosts[item.id] ?? 0;
         const freq = freqs[item.id] ?? item.defaultFrequency ?? (item.isOneTime ? 1 : 12);
 
-        if (freq === 12 && !item.isOneTime) {
-          // Monthly item: add to all 12 months
-          for (let m = 0; m < 12; m++) {
-            monthlyBudgets[m] += cost;
-          }
-        } else if (item.dueMonths && item.dueMonths.length > 0) {
-          // Item has explicitly scheduled due month(s)
-          item.dueMonths.forEach((mNum) => {
-            if (mNum >= 1 && mNum <= 12) {
-              monthlyBudgets[mNum - 1] += cost;
-            }
-          });
-        } else {
-          // Non-monthly without explicit due months: spread evenly (sinking fund accrual)
-          const annualTotal = item.isOneTime ? cost : cost * freq;
-          const monthlyPortion = annualTotal / 12;
-          for (let m = 0; m < 12; m++) {
-            monthlyBudgets[m] += monthlyPortion;
-          }
-        }
+        addBudget(item.category || 'Living', getItemMonthlySchedule(item, cost, freq));
       }
     } else {
       const plannedLiving = activeLedgerRow?.plannedBaseLivingExpenses ?? (inputs.annualLivingExpenses ?? 100000);
-      const monthlyPortion = plannedLiving / 12;
-      for (let m = 0; m < 12; m++) {
-        monthlyBudgets[m] += monthlyPortion;
-      }
+      addBudget('Living', Array(MONTHS_PER_YEAR).fill(plannedLiving / MONTHS_PER_YEAR));
     }
 
     // Healthcare Obligations spread evenly across all 12 months
@@ -869,11 +967,9 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
       (activeLedgerRow?.plannedHealthcareOOP ?? 0) +
       (activeLedgerRow?.combinedSurchargeAnnual ?? 0)) / 12;
 
-    for (let m = 0; m < 12; m++) {
-      monthlyBudgets[m] += healthcareMonthly;
-    }
+    addBudget('Healthcare', Array(MONTHS_PER_YEAR).fill(healthcareMonthly));
 
-    return monthlyBudgets;
+    return byCategory;
   }, [
     inputs.useDetailedExpenses,
     inputs.detailedExpenses,
@@ -885,233 +981,63 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
     activeLedgerRow,
   ]);
 
-  // Monthly / Cumulative Stacked Category Spend Chart Data
-  const monthlyExpensesChartData = useMemo(() => {
-    const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const scheduledMonthlyBudgets = useMemo(() => {
+    const total: number[] = Array(MONTHS_PER_YEAR).fill(0);
+    Object.values(scheduledBudgetsByCategory).forEach((amounts) => {
+      amounts.forEach((amt, m) => {
+        total[m] += amt;
+      });
+    });
+    return total;
+  }, [scheduledBudgetsByCategory]);
 
-    const CATEGORY_COLORS: Record<string, { bg: string; border: string }> = {
-      'Living': { bg: 'rgba(56, 189, 248, 0.85)', border: '#38bdf8' },
-      'Home': { bg: 'rgba(99, 102, 241, 0.85)', border: '#6366f1' },
-      'Utilities': { bg: 'rgba(234, 179, 8, 0.85)', border: '#eab308' },
-      'Transportation': { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
-      'Auto': { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
-      'Leisure': { bg: 'rgba(236, 72, 153, 0.85)', border: '#ec4899' },
-      'Healthcare': { bg: 'rgba(20, 184, 166, 0.85)', border: '#14b8a6' },
-      'Insurance': { bg: 'rgba(14, 165, 233, 0.85)', border: '#0ea5e9' },
-      'Charity': { bg: 'rgba(249, 115, 22, 0.85)', border: '#f97316' },
-      'Taxes': { bg: 'rgba(244, 63, 94, 0.85)', border: '#f43f5e' },
-      'One-Time Expenses': { bg: 'rgba(245, 158, 11, 0.85)', border: '#f59e0b' },
-      'Custom': { bg: 'rgba(148, 163, 184, 0.85)', border: '#94a3b8' },
-    };
-
-    const FALLBACK_PALETTE = [
-      { bg: 'rgba(56, 189, 248, 0.85)', border: '#38bdf8' },
-      { bg: 'rgba(99, 102, 241, 0.85)', border: '#6366f1' },
-      { bg: 'rgba(236, 72, 153, 0.85)', border: '#ec4899' },
-      { bg: 'rgba(234, 179, 8, 0.85)', border: '#eab308' },
-      { bg: 'rgba(20, 184, 166, 0.85)', border: '#14b8a6' },
-      { bg: 'rgba(249, 115, 22, 0.85)', border: '#f97316' },
-      { bg: 'rgba(168, 85, 247, 0.85)', border: '#a855f7' },
-      { bg: 'rgba(244, 63, 94, 0.85)', border: '#f43f5e' },
-    ];
-
-    const groupsSet = new Set<string>();
-    if (inputs.detailedExpenses?.catalog?.categories) {
-      inputs.detailedExpenses.catalog.categories.forEach((c) => groupsSet.add(c));
-    }
-
-    const groupMonthlySpends: Record<string, number[]> = {};
-    const initGroup = (g: string) => {
-      if (!groupMonthlySpends[g]) {
-        groupMonthlySpends[g] = Array(12).fill(0);
-      }
-    };
-
-    groupsSet.forEach((g) => initGroup(g));
-
+  // Monthly logged actuals by category for the selected year
+  const actualsByCategory = useMemo(() => {
+    const byCategory: Record<string, number[]> = {};
     allYearLoggedExpenses.forEach((exp) => {
       if (!exp.date) return;
       const m = parseInt(exp.date.split('-')[1], 10);
-      if (m >= 1 && m <= 12) {
-        let group = 'Living';
-        if (exp.categoryName) {
-          group = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName.trim();
-        }
-        groupsSet.add(group);
-        initGroup(group);
-        groupMonthlySpends[group][m - 1] += (exp.amount || 0);
+      if (m < 1 || m > MONTHS_PER_YEAR) return;
+      let group = exp.category || 'Living';
+      if (!exp.category && exp.categoryName) {
+        group = exp.categoryName.includes(' - ') ? exp.categoryName.split(' - ')[0].trim() : exp.categoryName.trim();
       }
+      if (!byCategory[group]) byCategory[group] = Array(MONTHS_PER_YEAR).fill(0);
+      byCategory[group][m - 1] += exp.amount || 0;
     });
+    return byCategory;
+  }, [allYearLoggedExpenses]);
 
-    const activeGroups = Array.from(groupsSet).filter((g) => {
-      const total = (groupMonthlySpends[g] || []).reduce((a, b) => a + b, 0);
-      return total > 0;
-    });
+  // Top-level Budget Tracker: all categories combined, or a single category when one is selected
+  const trackerCategoryRows = useMemo(() => {
+    const names = new Set([...Object.keys(scheduledBudgetsByCategory), ...Object.keys(actualsByCategory)]);
+    const zeros = Array(MONTHS_PER_YEAR).fill(0);
+    return Array.from(names)
+      .map((name) => {
+        const monthlyActual = actualsByCategory[name] ?? zeros;
+        const monthlyBudget = scheduledBudgetsByCategory[name] ?? zeros;
+        return { name, ...computeBudgetTracker(monthlyActual, monthlyBudget, selectedYear) };
+      })
+      .filter((r) => r.annualBudget > 0 || r.ytdActual > 0)
+      .sort((a, b) => (a.ytdBudget - a.ytdActual) - (b.ytdBudget - b.ytdActual));
+  }, [scheduledBudgetsByCategory, actualsByCategory, selectedYear]);
 
-    const isCumulative = chartAggregationMode === 'cumulative';
-
-    // Build budget line data
-    let budgetLineData: number[];
-    if (isCumulative) {
-      let runningSum = 0;
-      budgetLineData = scheduledMonthlyBudgets.map((b) => {
-        runningSum += b;
-        return runningSum;
-      });
-    } else {
-      budgetLineData = scheduledMonthlyBudgets;
-    }
-
-    const barDatasets = activeGroups.map((group, idx) => {
-      const colors = CATEGORY_COLORS[group] || FALLBACK_PALETTE[idx % FALLBACK_PALETTE.length];
-      let data = groupMonthlySpends[group];
-      if (isCumulative) {
-        let runningSpend = 0;
-        data = data.map((s) => {
-          runningSpend += s;
-          return runningSpend;
-        });
-      }
-
+  const trackerSeries = useMemo(() => {
+    const zeros = Array(MONTHS_PER_YEAR).fill(0);
+    if (trackerCategory) {
       return {
-        type: 'bar' as const,
-        label: group,
-        data,
-        backgroundColor: colors.bg,
-        borderColor: colors.border,
-        borderWidth: 1,
-        stack: 'expensesStack',
-        borderRadius: 3,
-        order: 2,
+        monthlyActual: actualsByCategory[trackerCategory] ?? zeros,
+        monthlyBudget: scheduledBudgetsByCategory[trackerCategory] ?? zeros,
       };
+    }
+    const monthlyActual: number[] = Array(MONTHS_PER_YEAR).fill(0);
+    Object.values(actualsByCategory).forEach((amounts) => {
+      amounts.forEach((amt, m) => {
+        monthlyActual[m] += amt;
+      });
     });
-
-    const budgetLineDataset = {
-      type: 'line' as const,
-      label: isCumulative ? 'Cumulative Planned Budget (YTD)' : 'Scheduled Monthly Budget',
-      data: budgetLineData,
-      borderColor: '#10b981',
-      backgroundColor: 'transparent',
-      borderWidth: 2.5,
-      borderDash: [6, 4],
-      pointRadius: 3,
-      pointHoverRadius: 6,
-      pointBackgroundColor: '#10b981',
-      pointBorderColor: '#0f172a',
-      order: 1,
-    };
-
-    return {
-      labels: MONTH_LABELS,
-      datasets: [budgetLineDataset, ...barDatasets],
-    };
-  }, [allYearLoggedExpenses, inputs.detailedExpenses, scheduledMonthlyBudgets, chartAggregationMode]);
-
-  const monthlyExpensesChartOptions = useMemo(() => ({
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: {
-      mode: 'index' as const,
-      intersect: false,
-    },
-    plugins: {
-      legend: {
-        position: 'top' as const,
-        onClick: (e: ChartEvent, legendItem: LegendItem, legend: { chart: ChartJS }) => {
-          const index = legendItem.datasetIndex;
-          if (index === undefined) return;
-          const ci = legend.chart;
-          const nativeEvent = e.native as MouseEvent | undefined;
-          const hasModifier = nativeEvent ? (nativeEvent.ctrlKey || nativeEvent.altKey || nativeEvent.shiftKey || nativeEvent.metaKey) : false;
-
-          if (hasModifier) {
-            // Modifier + Click: Solo / Isolate (or reset if already soloed)
-            let visibleCount = 0;
-            let isClickedVisible = false;
-            ci.data.datasets.forEach((_, i: number) => {
-              if (ci.isDatasetVisible(i)) {
-                visibleCount++;
-                if (i === index) {
-                  isClickedVisible = true;
-                }
-              }
-            });
-
-            if (visibleCount === 1 && isClickedVisible) {
-              // Already soloed: Show all
-              ci.data.datasets.forEach((_, i: number) => {
-                ci.setDatasetVisibility(i, true);
-              });
-            } else {
-              // Solo this dataset
-              ci.data.datasets.forEach((_, i: number) => {
-                ci.setDatasetVisibility(i, i === index);
-              });
-            }
-          } else {
-            // Standard Click: Toggle individually
-            const isVisible = ci.isDatasetVisible(index);
-            ci.setDatasetVisibility(index, !isVisible);
-          }
-
-          ci.update();
-
-          // Update hasHiddenExpensesDatasets state to conditionally render Show All Categories UI
-          let anyHidden = false;
-          ci.data.datasets.forEach((_, i: number) => {
-            if (!ci.isDatasetVisible(i)) {
-              anyHidden = true;
-            }
-          });
-          setHasHiddenExpensesDatasets(anyHidden);
-        },
-        labels: {
-          color: '#cbd5e1',
-          boxWidth: 15,
-          padding: 12,
-          usePointStyle: true,
-          font: { size: 11, weight: 500 },
-        },
-      },
-      tooltip: {
-        backgroundColor: 'rgba(15, 23, 42, 0.95)',
-        titleColor: '#f8fafc',
-        bodyColor: '#cbd5e1',
-        borderColor: '#334155',
-        borderWidth: 1,
-        padding: 10,
-        callbacks: {
-          label: (context: { dataset: { label?: string; type?: string }; raw: unknown }) => {
-            const val = Number(context.raw) || 0;
-            if (val === 0 && context.dataset.type === 'bar') return '';
-            return ` ${context.dataset.label || 'Spend'}: ${formatCurrency(val)}`;
-          },
-          footer: (items: Array<{ dataset: { type?: string }; raw: unknown }>) => {
-            const totalActual = items
-              .filter((i) => i.dataset.type === 'bar')
-              .reduce((sum: number, i) => sum + (Number(i.raw) || 0), 0);
-            return totalActual > 0 ? `Total Actual: ${formatCurrency(totalActual)}` : '';
-          },
-        },
-      },
-    },
-    scales: {
-      x: {
-        stacked: true,
-        ticks: { color: '#94a3b8', font: { size: 11 } },
-        grid: { color: 'rgba(51, 65, 85, 0.25)' },
-      },
-      y: {
-        stacked: true,
-        ticks: {
-          color: '#94a3b8',
-          font: { size: 11 },
-          callback: (val: string | number) => formatCurrency(Number(val)),
-        },
-        grid: { color: 'rgba(51, 65, 85, 0.25)' },
-      },
-    },
-  }), []);
+    return { monthlyActual, monthlyBudget: scheduledMonthlyBudgets };
+  }, [trackerCategory, actualsByCategory, scheduledBudgetsByCategory, scheduledMonthlyBudgets]);
 
   // Update field in active record
   const handleFieldChange = <K extends keyof YearActualsRecord>(field: K, value: YearActualsRecord[K]) => {
@@ -1697,6 +1623,16 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               <span>Import / Backfill</span>
             </button>
 
+            <button
+              type="button"
+              onClick={() => setShowBulkEditModal(true)}
+              className="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm shrink-0 whitespace-nowrap cursor-pointer"
+              title="Filter and bulk edit logged actual expenses"
+            >
+              <Sliders className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Bulk Edit</span>
+            </button>
+
             <a
               href="/expenser"
               target="_blank"
@@ -1865,7 +1801,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           </div>
         </div>
 
-        {/* 3-Way View Selector: Table / Graph / Hide */}
+        {/* 3-Way View Selector: Table / Budget Tracker / Hide */}
         <div className="flex justify-center pt-2 pb-1">
           <div className="inline-flex p-1 bg-slate-950/80 rounded-xl border border-slate-800 shadow-inner">
             <button
@@ -1883,15 +1819,15 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
 
             <button
               type="button"
-              onClick={() => setExpensesDisplayMode(prev => prev === 'chart' ? 'none' : 'chart')}
+              onClick={() => setExpensesDisplayMode(prev => prev === 'tracker' ? 'none' : 'tracker')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
-                expensesDisplayMode === 'chart'
+                expensesDisplayMode === 'tracker'
                   ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
               }`}
             >
-              <BarChart3 className="w-3.5 h-3.5" />
-              <span>Graph View</span>
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Budget Tracker</span>
             </button>
 
             <button
@@ -1910,85 +1846,67 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
           </div>
         </div>
 
-        {/* Graph View: Monthly / Cumulative Stacked Bar Chart with Budget Benchmark */}
-        {expensesDisplayMode === 'chart' && (
+        {/* Budget Tracker View: cumulative budget vs actual, variance, and category breakdown */}
+        {expensesDisplayMode === 'tracker' && (
           <div className="space-y-3 pt-1 animate-in fade-in duration-200">
-            <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-2.5">
-                <div className="flex items-center gap-2">
-                  <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    <BarChart3 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
-                      {chartAggregationMode === 'monthly'
-                        ? `Monthly Spend by Category vs. Scheduled Budget (${selectedYear})`
-                        : `Cumulative Year-to-Date (YTD) Spend vs. Budget (${selectedYear})`}
-                    </h4>
-                    <p className="text-[11px] text-slate-400">
-                      {chartAggregationMode === 'monthly'
-                        ? 'Category spending compared against true scheduled monthly budgets (including scheduled due months for property taxes & insurance).'
-                        : 'Running cumulative total of actual spend compared against cumulative planned budget progression.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
-                  {hasHiddenExpensesDatasets && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (monthlyExpensesChartRef.current) {
-                          const chart = monthlyExpensesChartRef.current;
-                          chart.data.datasets.forEach((_, i: number) => {
-                            chart.setDatasetVisibility(i, true);
-                          });
-                          chart.update();
-                          setHasHiddenExpensesDatasets(false);
-                        }
-                      }}
-                      className="text-xs font-semibold px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 rounded-lg transition-all cursor-pointer flex items-center gap-1.5"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Show All Categories</span>
-                    </button>
-                  )}
-
-                  {/* Monthly vs Cumulative Toggle */}
-                  <div className="inline-flex p-0.5 bg-slate-900 rounded-lg border border-slate-800 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => setChartAggregationMode('monthly')}
-                      className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                        chartAggregationMode === 'monthly'
-                          ? 'bg-emerald-500 text-slate-950 shadow font-bold'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Monthly Cash Flow
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setChartAggregationMode('cumulative')}
-                      className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                        chartAggregationMode === 'cumulative'
-                          ? 'bg-emerald-500 text-slate-950 shadow font-bold'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Cumulative YTD
-                    </button>
-                  </div>
-                </div>
+            <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 pb-2.5">
+                <h4 className="text-xs font-bold text-white">
+                  Budget Tracker: {trackerCategory ?? 'All Categories'} ({selectedYear})
+                </h4>
+                {trackerCategory && (
+                  <button
+                    type="button"
+                    onClick={() => setTrackerCategory(null)}
+                    className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer"
+                  >
+                    Show all categories
+                  </button>
+                )}
               </div>
 
-              <div className="h-80 w-full pt-1">
-                <Chart
-                  ref={monthlyExpensesChartRef}
-                  type="bar"
-                  data={monthlyExpensesChartData}
-                  options={monthlyExpensesChartOptions}
-                />
+              <BudgetTrackerChart
+                monthlyActual={trackerSeries.monthlyActual}
+                monthlyBudget={trackerSeries.monthlyBudget}
+                selectedYear={selectedYear}
+                formatCurrency={formatCurrency}
+              />
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300 divide-y divide-slate-800">
+                  <thead className="text-slate-400 uppercase text-[10px] font-bold tracking-wider">
+                    <tr>
+                      <th className="px-3 py-2">Category</th>
+                      <th className="px-3 py-2 text-right">YTD Budget</th>
+                      <th className="px-3 py-2 text-right">YTD Actual</th>
+                      <th className="px-3 py-2 text-right">Under / (Over)</th>
+                      <th className="px-3 py-2 text-right">Projected Year-End</th>
+                      <th className="px-3 py-2 text-right">Annual Budget</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {trackerCategoryRows.map((row) => {
+                      const rowVariance = row.ytdBudget - row.ytdActual;
+                      return (
+                        <tr
+                          key={row.name}
+                          onClick={() => setTrackerCategory(prev => (prev === row.name ? null : row.name))}
+                          className={`cursor-pointer transition-colors hover:bg-slate-900 ${trackerCategory === row.name ? 'bg-emerald-500/10' : ''}`}
+                        >
+                          <td className="px-3 py-2 font-semibold text-white">{row.name}</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.ytdBudget)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.ytdActual)}</td>
+                          <td className={`px-3 py-2 text-right font-mono font-semibold ${rowVariance >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {formatCurrency(rowVariance)}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.projectedYearEnd)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.annualBudget)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p className="text-[11px] text-slate-500 mt-2">Click a category to focus the charts on it. Sorted with the most over-budget categories first.</p>
               </div>
             </div>
           </div>
@@ -2073,17 +1991,30 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                     <table className="w-full text-left text-xs text-slate-300 divide-y divide-slate-800">
                       <thead className="bg-slate-950/80 text-slate-400 uppercase text-[10px] font-bold tracking-wider">
                         <tr>
-                          <th className="px-3.5 py-2.5">Line Item / Category</th>
-                          <th className="px-3.5 py-2.5 text-right">Planned Budget</th>
-                          <th className="px-3.5 py-2.5 text-right">Actual Spend</th>
-                          <th className="px-3.5 py-2.5 text-right">Variance</th>
-                          <th className="px-3.5 py-2.5">Budget Usage</th>
-                          <th className="px-3.5 py-2.5">Payer Breakdown</th>
-                          <th className="px-3.5 py-2.5 text-center">Actuals</th>
+                          {COMPARISON_COLUMNS.map((col) => (
+                            <th
+                              key={col.field}
+                              onClick={() => handleToggleComparisonSort(col.field, col.defaultDirection)}
+                              className={`px-3.5 py-2.5 cursor-pointer hover:text-white transition-colors ${col.align}`}
+                            >
+                              <div className={`flex items-center gap-1.5 ${col.align === 'text-right' ? 'justify-end' : col.align === 'text-center' ? 'justify-center' : ''}`}>
+                                <span>{col.label}</span>
+                                {comparisonSortField === col.field ? (
+                                  comparisonSortDirection === 'asc' ? (
+                                    <ArrowUp className="w-3 h-3 text-emerald-400" />
+                                  ) : (
+                                    <ArrowDown className="w-3 h-3 text-emerald-400" />
+                                  )
+                                ) : (
+                                  <ArrowUpDown className="w-3 h-3 text-slate-600" />
+                                )}
+                              </div>
+                            </th>
+                          ))}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
-                        {filteredComparisonItems.map((item) => {
+                        {sortedComparisonItems.map((item) => {
                           const isOver = item.variance < 0;
                           const hasSpend = item.actualAnnual > 0;
                           return (
@@ -2243,7 +2174,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                         <div className="flex items-center space-x-2">
                           <span className="font-bold text-white">${exp.amount.toFixed(2)}</span>
                           <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[11px]">
-                            {exp.categoryName}
+                            {exp.category && exp.name ? `${exp.category} • ${exp.name}` : exp.categoryName}
                           </span>
                         </div>
                         <div className="text-[11px] text-slate-500 mt-0.5 flex items-center space-x-2">
@@ -2860,20 +2791,39 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Individual actual expenses logged for this line item. Edit or delete entries to correct mistakes.
+                    Individual actual expenses logged for this expense name. Edit or delete entries to correct mistakes.
                   </p>
                 </div>
               </div>
+              <div className="flex items-center gap-2 shrink-0 ml-3">
+                <div className="flex items-center bg-slate-950 border border-slate-800 rounded-xl p-0.5 text-[11px] font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => setBreakdownViewMode('table')}
+                    className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors ${breakdownViewMode === 'table' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Transactions
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBreakdownViewMode('tracker')}
+                    className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors flex items-center gap-1 ${breakdownViewMode === 'tracker' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <TrendingUp className="w-3 h-3" />
+                    Budget Tracker
+                  </button>
+                </div>
               <button
                 type="button"
                 onClick={() => {
                   setSelectedLineItemForBreakdown(null);
                   setEditingExpenseId(null);
                 }}
-                className="p-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors cursor-pointer shrink-0 ml-3"
+                className="p-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
+              </div>
             </div>
 
             {/* Quick Stats Bar */}
@@ -2907,6 +2857,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
             </div>
 
             {/* Filter & Search Bar */}
+            {breakdownViewMode === 'table' && (
             <div className="p-3.5 bg-slate-900/80 border-b border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2 flex-1">
                 <div className="relative flex-1 max-w-sm flex items-center bg-slate-950 border border-slate-800 focus-within:border-emerald-500 rounded-xl px-2.5 py-1.5 transition-all">
@@ -2964,6 +2915,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 )}
               </div>
             </div>
+            )}
 
             {/* Error Message banner if edit fails */}
             {expenseEditError && (
@@ -2982,7 +2934,18 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
               </div>
             )}
 
-            {/* Scrollable Tabular Display */}
+            {breakdownViewMode === 'tracker' && lineItemMonthlySeries && (
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+                <BudgetTrackerChart
+                  monthlyActual={lineItemMonthlySeries.monthlyActual}
+                  monthlyBudget={lineItemMonthlySeries.monthlyBudget}
+                  selectedYear={selectedYear}
+                  formatCurrency={formatCurrency}
+                />
+              </div>
+            )}
+
+            {breakdownViewMode === 'table' && (
             <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
               {activeLineItemExpenses.length === 0 ? (
                 <div className="py-16 text-center space-y-2 px-4">
@@ -3053,7 +3016,23 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                           )}
                         </div>
                       </th>
-                      <th className="px-4 py-3">Note / Memo</th>
+                      <th
+                        onClick={() => handleToggleSort('notes')}
+                        className="px-4 py-3 cursor-pointer hover:text-white transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Note / Memo</span>
+                          {breakdownSortField === 'notes' ? (
+                            breakdownSortDirection === 'asc' ? (
+                              <ArrowUp className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <ArrowDown className="w-3 h-3 text-emerald-400" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="w-3 h-3 text-slate-600" />
+                          )}
+                        </div>
+                      </th>
                       <th className="px-4 py-3 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -3182,6 +3161,7 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
                 </table>
               )}
             </div>
+            )}
 
             {/* Modal Footer */}
             <div className="p-4 bg-slate-950/70 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
@@ -3212,6 +3192,25 @@ export const ActualsWorkspace: React.FC<ActualsWorkspaceProps> = ({
             await loadLoggedExpenses();
           }}
           onUpdateActualsLivingExpenses={handleUpdateActualsLivingExpenses}
+        />
+      )}
+      {/* Bulk Edit Expenses Modal */}
+      {showBulkEditModal && (
+        <BulkEditExpensesModal
+          isOpen={showBulkEditModal}
+          onClose={() => setShowBulkEditModal(false)}
+          selectedYear={selectedYear}
+          recordedYears={recordedYears}
+          plannerCatalogItems={comparisonItems.map((c) => ({
+            id: c.id,
+            groupCategory: c.group,
+            name: c.name,
+            displayName: `${c.group} - ${c.name}`,
+            plannedMonthlyDefault: Math.round(c.plannedAnnual / 12),
+          }))}
+          onExpensesUpdated={() => {
+            loadLoggedExpenses();
+          }}
         />
       )}
       {/* Cloud Auth Modal for DynamoDB Access */}
