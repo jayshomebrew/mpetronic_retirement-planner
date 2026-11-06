@@ -33,6 +33,7 @@ import { MonteCarloWorkspace } from './components/MonteCarloWorkspace';
 import { PlanComparisonWorkspace } from './components/PlanComparisonWorkspace';
 import { ActualsWorkspace } from './components/ActualsWorkspace';
 import { BucketManagementWorkspace } from './components/BucketManagementWorkspace';
+import { RebalancingWorkspace } from './components/RebalancingWorkspace';
 import { DocumentationDialog } from './components/DocumentationDialog';
 import { AboutDialog } from './components/AboutDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
@@ -1168,6 +1169,14 @@ function App() {
             inputs={activeInputs}
             onInputsChange={handleInputsChange}
             simulateSurvivor={simulateSurvivor}
+          />
+        )}
+
+        {/* Workspace 8: Account Rebalancing */}
+        {activeView === 'rebalancing' && (
+          <RebalancingWorkspace
+            primaryName={activeInputs.you.name}
+            spouseName={activeInputs.wife.name}
           />
         )}
       </DashboardLayout>

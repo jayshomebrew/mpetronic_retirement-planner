@@ -147,6 +147,38 @@ describe('plannerCategories synchronization', () => {
     expect(deletedIds).not.toContain('healthcare-oop');
   });
 
+  it('should not purge an item the live plan has when a stale plan lacks it, and keeps the custom flag', async () => {
+    const liveItem = { id: 'item_new', name: 'Hobbies', category: 'Leisure', defaultFrequency: 12 };
+    const livePlan = {
+      ...DEFAULT_DETAILED_EXPENSES_STATE,
+      catalog: { categories: ['Leisure'], items: [liveItem] },
+    };
+    mockStorage.setItem('retirement_planner_inputs', JSON.stringify({ detailedExpenses: livePlan }));
+
+    const stalePlan = {
+      ...DEFAULT_DETAILED_EXPENSES_STATE,
+      catalog: { categories: ['Leisure'], items: [{ id: 'item_old', name: 'Golf', category: 'Leisure', defaultFrequency: 12 }] },
+    };
+    const deletedIds: string[] = [];
+    const mockAdapter = {
+      getCategories: vi.fn().mockResolvedValue([
+        { id: 'item_new', name: 'Leisure - Hobbies', plannedMonthlyDefault: 0, isCustom: false },
+        { id: 'item_old', name: 'Leisure - Golf', plannedMonthlyDefault: 0, isCustom: true },
+      ]),
+      saveCategory: vi.fn().mockResolvedValue(undefined),
+      deleteCategory: vi.fn().mockImplementation((id: string) => {
+        deletedIds.push(id);
+        return Promise.resolve();
+      }),
+    };
+
+    await syncPlannerCatalogToCloudStorage(stalePlan, mockAdapter as unknown as StorageAdapter);
+
+    expect(deletedIds).not.toContain('item_new');
+    const golfSave = mockAdapter.saveCategory.mock.calls.find(([c]) => c.id === 'item_old');
+    expect(golfSave?.[0].isCustom).toBe(true);
+  });
+
   it('should exclude state-inapplicable items and deleted categories from getPlannerExpenseCatalog', () => {
     const detailedExpenses = {
       ...DEFAULT_DETAILED_EXPENSES_STATE,

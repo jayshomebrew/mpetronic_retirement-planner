@@ -38,3 +38,6 @@ dist-bin/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Personal Claude Code permission overrides
+.claude/settings.local.json

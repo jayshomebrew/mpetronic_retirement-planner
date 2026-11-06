@@ -1,12 +1,43 @@
-import { ActualExpense, ExpenseCategory, FullHouseholdArchive, StorageAdapter, SyncStatus } from '../types/expenses';
+import { ActualExpense, ExpenseCategory, FullHouseholdArchive, NewExpenseInput, StorageAdapter } from '../types/expenses';
+import { IndexedDbRebalancingStorage } from './rebalancing/IndexedDbRebalancingStorage';
 
 const DB_NAME = 'RetirementExpenserDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_EXPENSES = 'expenses';
 const STORE_CATEGORIES = 'categories';
 
+export function normalizeStoredExpense(raw: Partial<ActualExpense> & Record<string, unknown>): ActualExpense {
+  if (!raw) return raw as ActualExpense;
+  let category = typeof raw.category === 'string' ? raw.category : undefined;
+  let name = typeof raw.name === 'string' ? raw.name : undefined;
+  if (!category && typeof raw.categoryName === 'string') {
+    const parts = raw.categoryName.split(' - ');
+    category = parts[0] || 'Uncategorized';
+    name = parts.slice(1).join(' - ') || raw.categoryName;
+  }
+  const catalogId = (typeof raw.catalogId === 'string' ? raw.catalogId : undefined) ||
+    (typeof raw.categoryId === 'string' ? raw.categoryId : undefined) || 'uncategorized';
+  const expenseId = typeof raw.expenseId === 'string' ? raw.expenseId : `exp_${Date.now()}`;
+  return {
+    ...raw,
+    expenseId,
+    catalogId,
+    category: category || 'Uncategorized',
+    name: name || 'Expense',
+    date: typeof raw.date === 'string' ? raw.date : new Date().toISOString().split('T')[0],
+    amount: Number(raw.amount) || 0,
+    enteredBy: typeof raw.enteredBy === 'string' ? raw.enteredBy : 'Primary',
+    syncStatus: raw.syncStatus || 'SYNCED',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+    categoryId: catalogId,
+    categoryName: (typeof raw.categoryName === 'string' ? raw.categoryName : undefined) || `${category || 'Uncategorized'} - ${name || 'Expense'}`,
+  };
+}
+
 export class IndexedDbStorageAdapter implements StorageAdapter {
   private dbPromise: Promise<IDBDatabase> | null = null;
+  private rebalancing = new IndexedDbRebalancingStorage();
 
   private async getDB(): Promise<IDBDatabase> {
     if (typeof window === 'undefined' || !window.indexedDB) {
@@ -44,8 +75,25 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
           const expenseStore = db.createObjectStore(STORE_EXPENSES, { keyPath: 'expenseId' });
           expenseStore.createIndex('date', 'date', { unique: false });
           expenseStore.createIndex('categoryId', 'categoryId', { unique: false });
+          expenseStore.createIndex('catalogId', 'catalogId', { unique: false });
+          expenseStore.createIndex('category', 'category', { unique: false });
+          expenseStore.createIndex('name', 'name', { unique: false });
           expenseStore.createIndex('syncStatus', 'syncStatus', { unique: false });
           expenseStore.createIndex('createdAt', 'createdAt', { unique: false });
+        } else {
+          const req = event.target as IDBOpenDBRequest;
+          if (req.transaction) {
+            const expenseStore = req.transaction.objectStore(STORE_EXPENSES);
+            if (!expenseStore.indexNames.contains('catalogId')) {
+              expenseStore.createIndex('catalogId', 'catalogId', { unique: false });
+            }
+            if (!expenseStore.indexNames.contains('category')) {
+              expenseStore.createIndex('category', 'category', { unique: false });
+            }
+            if (!expenseStore.indexNames.contains('name')) {
+              expenseStore.createIndex('name', 'name', { unique: false });
+            }
+          }
         }
       };
     });
@@ -173,7 +221,10 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       const store = tx.objectStore(STORE_EXPENSES);
       const req = store.getAll();
 
-      req.onsuccess = () => resolve(req.result || []);
+      req.onsuccess = () => {
+        const raw = (req.result || []) as (Partial<ActualExpense> & Record<string, unknown>)[];
+        resolve(raw.map(normalizeStoredExpense));
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -182,24 +233,17 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     return (await this.getAllExpenses()) as unknown as Array<Record<string, unknown>>;
   }
 
-  async saveExpense(
-    expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-      expenseId?: string;
-      createdAt?: string;
-      updatedAt?: string;
-      syncStatus?: SyncStatus;
-    }
-  ): Promise<ActualExpense> {
+  async saveExpense(expense: NewExpenseInput): Promise<ActualExpense> {
     const db = await this.getDB();
     const now = new Date().toISOString();
     const expenseId = expense.expenseId || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const newRecord: ActualExpense = {
+    const newRecord: ActualExpense = normalizeStoredExpense({
       ...expense,
       expenseId,
       syncStatus: expense.syncStatus || 'PENDING_SYNC',
       createdAt: expense.createdAt || now,
       updatedAt: expense.updatedAt || now,
-    };
+    });
 
     return new Promise<ActualExpense>((resolve, reject) => {
       const tx = db.transaction(STORE_EXPENSES, 'readwrite');
@@ -211,26 +255,19 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     });
   }
 
-  async saveExpensesBatch(
-    expenses: Array<
-      Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-        expenseId?: string;
-        createdAt?: string;
-        updatedAt?: string;
-        syncStatus?: SyncStatus;
-      }
-    >
-  ): Promise<ActualExpense[]> {
+  async saveExpensesBatch(expenses: NewExpenseInput[]): Promise<ActualExpense[]> {
     if (expenses.length === 0) return [];
     const db = await this.getDB();
     const now = new Date().toISOString();
-    const records: ActualExpense[] = expenses.map(exp => ({
-      ...exp,
-      expenseId: exp.expenseId || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      syncStatus: exp.syncStatus || 'PENDING_SYNC',
-      createdAt: exp.createdAt || now,
-      updatedAt: exp.updatedAt || now,
-    }));
+    const records: ActualExpense[] = expenses.map(exp =>
+      normalizeStoredExpense({
+        ...exp,
+        expenseId: exp.expenseId || `exp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        syncStatus: exp.syncStatus || 'PENDING_SYNC',
+        createdAt: exp.createdAt || now,
+        updatedAt: exp.updatedAt || now,
+      })
+    );
 
     return new Promise<ActualExpense[]>((resolve, reject) => {
       const tx = db.transaction(STORE_EXPENSES, 'readwrite');
@@ -253,11 +290,11 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       throw new Error(`Expense ${id} not found`);
     }
 
-    const updated: ActualExpense = {
+    const updated: ActualExpense = normalizeStoredExpense({
       ...existing,
       ...updates,
       updatedAt: new Date().toISOString(),
-    };
+    });
 
     return new Promise<ActualExpense>((resolve, reject) => {
       const tx = db.transaction(STORE_EXPENSES, 'readwrite');
@@ -269,6 +306,58 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     });
   }
 
+  async updateExpensesBatch(
+    batch: Array<{ id: string; updates: Partial<ActualExpense> }>
+  ): Promise<ActualExpense[]> {
+    if (batch.length === 0) return [];
+    const db = await this.getDB();
+    const now = new Date().toISOString();
+
+    return new Promise<ActualExpense[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_EXPENSES, 'readwrite');
+      const store = tx.objectStore(STORE_EXPENSES);
+      const results: ActualExpense[] = [];
+      let rejected = false;
+
+      tx.oncomplete = () => resolve(results);
+      tx.onerror = () => {
+        if (!rejected) reject(tx.error);
+      };
+      tx.onabort = () => {
+        if (!rejected) reject(tx.error);
+      };
+
+      for (const item of batch) {
+        const getReq = store.get(item.id);
+        getReq.onsuccess = () => {
+          if (rejected) return;
+          const raw = getReq.result;
+          if (!raw) {
+            rejected = true;
+            tx.abort();
+            reject(new Error(`Expense ${item.id} not found`));
+            return;
+          }
+          const existing = normalizeStoredExpense(raw);
+          const updated: ActualExpense = normalizeStoredExpense({
+            ...existing,
+            ...item.updates,
+            updatedAt: item.updates.updatedAt || now,
+          });
+          results.push(updated);
+          store.put(updated);
+        };
+        getReq.onerror = () => {
+          if (!rejected) {
+            rejected = true;
+            tx.abort();
+            reject(getReq.error);
+          }
+        };
+      }
+    });
+  }
+
   async getExpenseById(id: string): Promise<ActualExpense | null> {
     const db = await this.getDB();
     return new Promise<ActualExpense | null>((resolve, reject) => {
@@ -276,7 +365,7 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       const store = tx.objectStore(STORE_EXPENSES);
       const req = store.get(id);
 
-      req.onsuccess = () => resolve(req.result || null);
+      req.onsuccess = () => resolve(req.result ? normalizeStoredExpense(req.result) : null);
       req.onerror = () => reject(req.error);
     });
   }
@@ -293,6 +382,18 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
     });
   }
 
+  async clearAllExpenses(): Promise<void> {
+    const db = await this.getDB();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_EXPENSES, 'readwrite');
+      const store = tx.objectStore(STORE_EXPENSES);
+      const req = store.clear();
+
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
   async getPendingSyncExpenses(): Promise<ActualExpense[]> {
     const db = await this.getDB();
     return new Promise<ActualExpense[]>((resolve, reject) => {
@@ -301,7 +402,10 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       const index = store.index('syncStatus');
       const req = index.getAll('PENDING_SYNC');
 
-      req.onsuccess = () => resolve(req.result || []);
+      req.onsuccess = () => {
+        const raw = (req.result || []) as (Partial<ActualExpense> & Record<string, unknown>)[];
+        resolve(raw.map(normalizeStoredExpense));
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -332,6 +436,7 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
   async exportArchive(): Promise<FullHouseholdArchive> {
     const categories = await this.getCategories();
     const expenses = await this.getAllExpenses();
+    const rebalancing = await this.rebalancing.exportRebalancing().catch(() => ({ accounts: [], snapshots: [] }));
 
     return {
       schemaVersion: 1,
@@ -340,6 +445,8 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       categories,
       expenses,
       annualOperations: {},
+      rebalancingAccounts: rebalancing.accounts,
+      rebalancingSnapshots: rebalancing.snapshots,
     };
   }
 
@@ -359,6 +466,16 @@ export class IndexedDbStorageAdapter implements StorageAdapter {
       const storeExp = txExp.objectStore(STORE_EXPENSES);
       for (const exp of archive.expenses) {
         storeExp.put(exp);
+      }
+    }
+
+    if (archive.rebalancingAccounts && archive.rebalancingAccounts.length > 0) {
+      const report = await this.rebalancing.importRebalancing(
+        archive.rebalancingAccounts,
+        archive.rebalancingSnapshots || []
+      );
+      if (report.skippedAccounts.length > 0) {
+        console.warn('Rebalancing import skipped existing accounts:', report.skippedAccounts.join(', '));
       }
     }
   }

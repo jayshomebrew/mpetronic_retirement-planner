@@ -575,7 +575,7 @@ export const PlanComparisonWorkspace: React.FC<PlanComparisonWorkspaceProps> = (
       {
         id: 'state',
         name: 'State Income Taxes',
-        desc: `State taxes paid over ${totalPlanYears} years based on Maryland vs Florida rules.`,
+        desc: `State taxes paid over ${totalPlanYears} years based on configured state and local tax rules.`,
         valA: statsA.stateTax,
         valB: statsB.stateTax,
         lowerIsBetter: true,

@@ -27,8 +27,7 @@ export interface HealthcareConfig {
   medicareStartMode?: 'age65' | 'customDate'; // 'age65' (default) or 'customDate'
   medicareStartDate?: string | null; // YYYY-MM-DD or YYYY-MM when customDate mode is chosen
   coveredByWorkingSpousePlan?: boolean; // Under-65 spouse covered under working spouse's employer health plan until primary retires
-  MD: StateHealthcareConfig;
-  FL: StateHealthcareConfig;
+  [stateCode: string]: StateHealthcareConfig | boolean | number | string | null | undefined;
 }
 
 export interface SpouseProfile {

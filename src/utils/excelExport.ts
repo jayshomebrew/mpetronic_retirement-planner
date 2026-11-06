@@ -5,12 +5,17 @@ export const generateExcelWorkbook = (ledger: SimulationResultRow[], inputs: App
   const wb = XLSX.utils.book_new();
   const simStartYear = getSimulationStartYear(inputs);
 
+  const stateA = inputs.jurisdiction.currentState;
+  const stateB = inputs.jurisdiction.targetState;
+  const hasRelocation = inputs.jurisdiction.relocationYear !== null && Boolean(stateB) && stateB !== stateA;
+
   // Helper to safely format healthcare values
-  const getHCVal = (person: 'you' | 'wife', state: 'MD' | 'FL', key: string) => {
+  const getHCVal = (person: 'you' | 'wife', state: string, key: string) => {
     const hc = person === 'you' ? inputs.you.healthcare : inputs.wife.healthcare;
     if (!hc) return "N/A";
-    const stateObj = state === 'MD' ? hc.MD : hc.FL;
-    return (stateObj as unknown as Record<string, unknown> | undefined)?.[key] ?? 0;
+    const raw = hc as Record<string, unknown>;
+    const stateObj = raw[state] as Record<string, unknown> | undefined;
+    return stateObj?.[key] ?? 0;
   };
 
   // Tab 1: Configuration Summary (AOA - Array of Arrays)
@@ -118,20 +123,28 @@ export const generateExcelWorkbook = (ledger: SimulationResultRow[], inputs: App
     if (inputs.you.healthcare) {
       configData.push(
         ["Primary - Custom Part B Base Premium", inputs.you.healthcare.medicarePartBPremium ?? "Default"],
-        ["Primary - MD Pre-65 Medical Premium / OOP", `${getHCVal('you', 'MD', 'pre65MedicalPremium')} / ${getHCVal('you', 'MD', 'pre65MedicalOOP')}`],
-        ["Primary - MD Post-65 Supplemental Premium / OOP", `${getHCVal('you', 'MD', 'supplementPremium')} / ${getHCVal('you', 'MD', 'supplementOOP')}`],
-        ["Primary - FL Pre-65 Medical Premium / OOP", `${getHCVal('you', 'FL', 'pre65MedicalPremium')} / ${getHCVal('you', 'FL', 'pre65MedicalOOP')}`],
-        ["Primary - FL Post-65 Supplemental Premium / OOP", `${getHCVal('you', 'FL', 'supplementPremium')} / ${getHCVal('you', 'FL', 'supplementOOP')}`]
+        [`Primary - ${stateA} Pre-65 Medical Premium / OOP`, `${getHCVal('you', stateA, 'pre65MedicalPremium')} / ${getHCVal('you', stateA, 'pre65MedicalOOP')}`],
+        [`Primary - ${stateA} Post-65 Supplemental Premium / OOP`, `${getHCVal('you', stateA, 'supplementPremium')} / ${getHCVal('you', stateA, 'supplementOOP')}`]
       );
+      if (hasRelocation) {
+        configData.push(
+          [`Primary - ${stateB} Pre-65 Medical Premium / OOP`, `${getHCVal('you', stateB, 'pre65MedicalPremium')} / ${getHCVal('you', stateB, 'pre65MedicalOOP')}`],
+          [`Primary - ${stateB} Post-65 Supplemental Premium / OOP`, `${getHCVal('you', stateB, 'supplementPremium')} / ${getHCVal('you', stateB, 'supplementOOP')}`]
+        );
+      }
     }
     if (!inputs.isSingleFiler && inputs.wife.healthcare) {
       configData.push(
         ["Spouse - Custom Part B Base Premium", inputs.wife.healthcare.medicarePartBPremium ?? "Default"],
-        ["Spouse - MD Pre-65 Medical Premium / OOP", `${getHCVal('wife', 'MD', 'pre65MedicalPremium')} / ${getHCVal('wife', 'MD', 'pre65MedicalOOP')}`],
-        ["Spouse - MD Post-65 Supplemental Premium / OOP", `${getHCVal('wife', 'MD', 'supplementPremium')} / ${getHCVal('wife', 'MD', 'supplementOOP')}`],
-        ["Spouse - FL Pre-65 Medical Premium / OOP", `${getHCVal('wife', 'FL', 'pre65MedicalPremium')} / ${getHCVal('wife', 'FL', 'pre65MedicalOOP')}`],
-        ["Spouse - FL Post-65 Supplemental Premium / OOP", `${getHCVal('wife', 'FL', 'supplementPremium')} / ${getHCVal('wife', 'FL', 'supplementOOP')}`]
+        [`Spouse - ${stateA} Pre-65 Medical Premium / OOP`, `${getHCVal('wife', stateA, 'pre65MedicalPremium')} / ${getHCVal('wife', stateA, 'pre65MedicalOOP')}`],
+        [`Spouse - ${stateA} Post-65 Supplemental Premium / OOP`, `${getHCVal('wife', stateA, 'supplementPremium')} / ${getHCVal('wife', stateA, 'supplementOOP')}`]
       );
+      if (hasRelocation) {
+        configData.push(
+          [`Spouse - ${stateB} Pre-65 Medical Premium / OOP`, `${getHCVal('wife', stateB, 'pre65MedicalPremium')} / ${getHCVal('wife', stateB, 'pre65MedicalOOP')}`],
+          [`Spouse - ${stateB} Post-65 Supplemental Premium / OOP`, `${getHCVal('wife', stateB, 'supplementPremium')} / ${getHCVal('wife', stateB, 'supplementOOP')}`]
+        );
+      }
     }
   }
 
@@ -200,8 +213,8 @@ export const generateExcelWorkbook = (ledger: SimulationResultRow[], inputs: App
   // Tab 3: Detailed Expenses (if enabled)
   if (inputs.useDetailedExpenses && inputs.detailedExpenses) {
     const expensesSheetData: Record<string, unknown>[] = [];
-    const stateA = inputs.jurisdiction.currentState || 'MD';
-    const stateB = inputs.jurisdiction.targetState || 'FL';
+    const stateA = inputs.jurisdiction.currentState;
+    const stateB = inputs.jurisdiction.targetState;
     const normExpenses = normalizeDetailedExpenses(inputs.detailedExpenses);
     const catalog = normExpenses.catalog;
     const costs = normExpenses.costs;

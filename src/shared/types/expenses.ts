@@ -1,3 +1,5 @@
+import type { RebalanceAccountTemplate, RebalanceSnapshot } from './rebalancing';
+
 export type SyncStatus = 'SYNCED' | 'PENDING_SYNC' | 'FAILED_SYNC';
 
 export interface ExpenseCategory {
@@ -12,16 +14,21 @@ export interface ExpenseCategory {
 
 export interface ActualExpense {
   expenseId: string;
+  catalogId: string; // Foreign key linking to catalog item definition
+  category: string; // Category group (e.g. "Subscriptions", "Living")
+  name: string; // Expense Name (e.g. "Amazon Prime", "Groceries")
   date: string; // ISO YYYY-MM-DD
   amount: number;
-  categoryId: string;
-  categoryName: string;
   enteredBy: string; // e.g. "Mike" | "Wife"
   notes?: string;
   tags?: string[];
   syncStatus: SyncStatus;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
+
+  // Backward-compatibility / transitional fields (deprecated)
+  categoryId?: string;
+  categoryName?: string;
 }
 export interface StatementColumnMapping {
   dateColumn: string;
@@ -91,7 +98,22 @@ export interface FullHouseholdArchive {
   expenses: ActualExpense[];
   annualOperations: Record<number, AnnualOperationsState>;
   planDocument?: unknown;
+  rebalancingAccounts?: RebalanceAccountTemplate[];
+  rebalancingSnapshots?: RebalanceSnapshot[];
 }
+
+export type NewExpenseInput = Omit<
+  ActualExpense,
+  'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'catalogId' | 'category' | 'name'
+> & {
+  expenseId?: string;
+  catalogId?: string;
+  category?: string;
+  name?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  syncStatus?: SyncStatus;
+};
 
 export interface StorageAdapter {
   // Expense operations
@@ -102,20 +124,12 @@ export interface StorageAdapter {
   getExpenses(year: number, month?: number): Promise<ActualExpense[]>;
   getRecentExpenses(limit?: number, sortBy?: 'occurred' | 'entered'): Promise<ActualExpense[]>;
   getExpenseById?(id: string): Promise<ActualExpense | null>;
-  saveExpense(expense: Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-    expenseId?: string;
-    createdAt?: string;
-    updatedAt?: string;
-    syncStatus?: SyncStatus;
-  }): Promise<ActualExpense>;
-  saveExpensesBatch?(expenses: Array<Omit<ActualExpense, 'expenseId' | 'createdAt' | 'updatedAt' | 'syncStatus'> & {
-    expenseId?: string;
-    createdAt?: string;
-    updatedAt?: string;
-    syncStatus?: SyncStatus;
-  }>): Promise<ActualExpense[]>;
+  saveExpense(expense: NewExpenseInput): Promise<ActualExpense>;
+  saveExpensesBatch?(expenses: NewExpenseInput[]): Promise<ActualExpense[]>;
   updateExpense(id: string, updates: Partial<ActualExpense>): Promise<ActualExpense>;
+  updateExpensesBatch?(batch: Array<{ id: string; updates: Partial<ActualExpense> }>): Promise<ActualExpense[]>;
   deleteExpense(id: string): Promise<void>;
+  clearAllExpenses?(): Promise<void>;
 
   // Pending queue sync
   getPendingSyncExpenses(): Promise<ActualExpense[]>;

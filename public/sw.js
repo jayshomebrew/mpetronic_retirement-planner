@@ -1,5 +1,5 @@
 // Expenser Companion PWA - Service Worker
-const CACHE_NAME = 'expenser-v4';
+const CACHE_NAME = 'expenser-v8';
 const ASSETS_TO_CACHE = [
   '/expenser.html',
   '/expenser-manifest.json',
@@ -52,7 +52,8 @@ self.addEventListener('fetch', (event) => {
     event.request.mode === 'navigate' ||
     url.pathname.endsWith('.html') ||
     url.pathname === '/' ||
-    url.pathname === '/expenser';
+    url.pathname === '/expenser' ||
+    url.pathname === '/expenser/';
 
   if (isHtmlNavigation) {
     event.respondWith(

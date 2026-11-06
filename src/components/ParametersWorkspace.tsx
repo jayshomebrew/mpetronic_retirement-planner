@@ -1071,7 +1071,7 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
                     <span className="text-xs font-semibold text-slate-300">Enable</span>
                     <input
                       type="checkbox"
-                      id="relocateToFlCheckbox"
+                      id="relocateCheckbox"
                       checked={inputs.jurisdiction.relocationYear !== null}
                       onChange={(e) => {
                         if (e.target.checked) {
@@ -1736,7 +1736,10 @@ export const ParametersWorkspace: React.FC<ParametersWorkspaceProps> = ({
                   <div>
                     <span className="text-xs font-bold text-slate-200 block">Itemized Expense Catalog Active</span>
                     <span className="text-[10px] text-slate-400">
-                      Maryland: {formatCurrency(mdMonthlySum * 12)}/yr (${Math.round(mdMonthlySum).toLocaleString()}/mo) • Florida: {formatCurrency(flMonthlySum * 12)}/yr (${Math.round(flMonthlySum).toLocaleString()}/mo)
+                      {getStateTaxProfile(inputs.jurisdiction.currentState || 'MD')?.name || inputs.jurisdiction.currentState}: {formatCurrency(mdMonthlySum * 12)}/yr (${Math.round(mdMonthlySum).toLocaleString()}/mo)
+                      {inputs.jurisdiction.relocationYear !== null && inputs.jurisdiction.targetState !== inputs.jurisdiction.currentState && (
+                        ` • ${getStateTaxProfile(inputs.jurisdiction.targetState)?.name || inputs.jurisdiction.targetState}: ${formatCurrency(flMonthlySum * 12)}/yr (${Math.round(flMonthlySum).toLocaleString()}/mo)`
+                      )}
                     </span>
                   </div>
                   <button

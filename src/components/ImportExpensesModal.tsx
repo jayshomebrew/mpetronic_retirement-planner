@@ -594,11 +594,15 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
         .map(row => {
           const catDisplayName = `${row.category} - ${row.lineItem}`;
           const noteText = [row.rawDescription, row.notes].filter(Boolean).join(' | ');
+          const catalogId = `cat_${row.category.toLowerCase()}_${row.lineItem.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
 
           return {
             date: row.date,
             amount: Math.round(row.amount * 100) / 100,
-            categoryId: `cat_${row.category.toLowerCase()}_${row.lineItem.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,
+            catalogId,
+            category: row.category,
+            name: row.lineItem,
+            categoryId: catalogId,
             categoryName: catDisplayName,
             enteredBy: row.payer || defaultPayer,
             notes: noteText || undefined,
@@ -832,7 +836,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Search by merchant, line item, amount..."
+                    placeholder="Search by merchant, expense name, amount..."
                     className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   {searchTerm && (
@@ -947,7 +951,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
                     onChange={(e) => setBulkLineItem(e.target.value)}
                     className="px-2 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-slate-100"
                   >
-                    <option value="">-- Set Line Item --</option>
+                    <option value="">-- Set Expense Name --</option>
                     {catalogItems
                       .filter(c => !bulkCategory || c.groupCategory === bulkCategory)
                       .map(i => (
@@ -992,7 +996,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
                     <th className="py-2.5 px-3 w-24">Date</th>
                     <th className="py-2.5 px-3 min-w-[200px]">Merchant / Payee</th>
                     <th className="py-2.5 px-3 w-36">Category</th>
-                    <th className="py-2.5 px-3 w-48">Line Item</th>
+                    <th className="py-2.5 px-3 w-48">Expense Name</th>
                     <th className="py-2.5 px-3 w-28 text-right">Amount</th>
                     <th className="py-2.5 px-3 min-w-[150px]">Notes</th>
                     <th className="py-2.5 px-3 w-28">Payer</th>
@@ -1116,7 +1120,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
                                 <option key={item.id} value={item.name}>{item.name}</option>
                               ))}
                               <option value="Unknown">Unknown / Uncategorized</option>
-                              <option value="__CREATE_NEW__">+ Create New Line Item...</option>
+                              <option value="__CREATE_NEW__">+ Create New Expense Name...</option>
                             </select>
                           </div>
                         </td>
@@ -1224,7 +1228,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-fade-in">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 p-6 w-full max-w-md space-y-4">
             <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
-              Create New Line Item
+              Create New Expense Name
             </h3>
             <p className="text-xs text-slate-500">
               This new item will be safely added to your catalog with safe defaults ($0 budget) and will be available for all future statements.
@@ -1246,7 +1250,7 @@ export const ImportExpensesModal: React.FC<ImportExpensesModalProps> = ({
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                  Line Item Name
+                  Expense Name
                 </label>
                 <input
                   type="text"

@@ -713,7 +713,9 @@ export function runRetirementSimulation(
     let yourMedicareOOP = 0;
     if (inputs.you.healthcare) {
       const hcRecord = inputs.you.healthcare as unknown as Record<string, StateHealthcareConfig | undefined>;
-      const stateHc = hcRecord[activeState] || (activeState === 'FL' ? inputs.you.healthcare.FL : inputs.you.healthcare.MD) || inputs.you.healthcare.MD;
+      const stateHc = hcRecord[activeState]
+        || (activeState === inputs.jurisdiction.currentState ? hcRecord[inputs.jurisdiction.currentState] : undefined)
+        || (activeState === inputs.jurisdiction.targetState ? hcRecord[inputs.jurisdiction.targetState] : undefined);
       const itemizedPre65 = ((stateHc?.pre65MedicalPremium ?? 0) + (stateHc?.pre65DentalPremium ?? 0) + (stateHc?.pre65VisionPremium ?? 0));
       yourPreMedicareAnnual = (itemizedPre65 > 0 ? itemizedPre65 : (inputs.you.preMedicareMonthlyPremium ?? 0)) * 12 * healthcareFactor;
       yourPreMedicareOOP = ((stateHc?.pre65MedicalOOP ?? 0) + (stateHc?.pre65DentalOOP ?? 0) + (stateHc?.pre65VisionOOP ?? 0)) * healthcareFactor;
@@ -739,7 +741,9 @@ export function runRetirementSimulation(
     if (!wifeDeceased) {
       if (inputs.wife.healthcare) {
         const wifeHcRecord = inputs.wife.healthcare as unknown as Record<string, StateHealthcareConfig | undefined>;
-        const stateHc = wifeHcRecord[activeState] || (activeState === 'FL' ? inputs.wife.healthcare.FL : inputs.wife.healthcare.MD) || inputs.wife.healthcare.MD;
+        const stateHc = wifeHcRecord[activeState]
+          || (activeState === inputs.jurisdiction.currentState ? wifeHcRecord[inputs.jurisdiction.currentState] : undefined)
+          || (activeState === inputs.jurisdiction.targetState ? wifeHcRecord[inputs.jurisdiction.targetState] : undefined);
         const itemizedPre65 = ((stateHc?.pre65MedicalPremium ?? 0) + (stateHc?.pre65DentalPremium ?? 0) + (stateHc?.pre65VisionPremium ?? 0));
         wifePreMedicareAnnual = (itemizedPre65 > 0 ? itemizedPre65 : (inputs.wife.preMedicareMonthlyPremium ?? 0)) * 12 * healthcareFactor;
         wifePreMedicareOOP = ((stateHc?.pre65MedicalOOP ?? 0) + (stateHc?.pre65DentalOOP ?? 0) + (stateHc?.pre65VisionOOP ?? 0)) * healthcareFactor;

@@ -70,6 +70,25 @@ describe('AwsCloudStorageAdapter', () => {
     expect(allCats.some(c => c.id === 'cat_coffee')).toBe(true);
   });
 
+  it('keeps a locally created category when its cloud push failed, then retries it', async () => {
+    vi.spyOn(AuthService, 'isAuthenticated').mockReturnValue(true);
+    vi.spyOn(AuthService, 'getIdToken').mockResolvedValue('mock_token');
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+
+    await adapter.saveCategory({ id: 'item_custom_1', name: 'Leisure - Hobbies', plannedMonthlyDefault: 0, isCustom: true });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Refresh from the cloud, which does not have the category yet; the retry push succeeds
+    fetchSpy
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ categories: [] }) } as unknown as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) } as unknown as Response);
+    const cats = await adapter.getCategories(true);
+
+    expect(cats.some(c => c.id === 'item_custom_1')).toBe(true);
+    const pushes = fetchSpy.mock.calls.filter(([, init]) => (init as RequestInit)?.method === 'POST');
+    expect(pushes.length).toBe(2);
+  });
+
   it('flushes pending expenses when authenticated', async () => {
     // Save expense while unauthenticated
     await adapter.saveExpense({
@@ -152,5 +171,90 @@ describe('AwsCloudStorageAdapter', () => {
       expect.stringContaining(`/api/expenses/${encodeURIComponent(saved.expenseId)}`),
       expect.objectContaining({ method: 'DELETE' })
     );
+  });
+
+  it('updates multiple expenses in batch and triggers a single cloud flush', async () => {
+    const exp1 = await adapter.saveExpense({
+      date: '2026-09-01',
+      amount: 20,
+      categoryId: 'cat_coffee',
+      categoryName: 'Living - Coffee',
+      enteredBy: 'Mike',
+    });
+    const exp2 = await adapter.saveExpense({
+      date: '2026-09-02',
+      amount: 40,
+      categoryId: 'cat_dining',
+      categoryName: 'Leisure - Dining',
+      enteredBy: 'Mike',
+    });
+
+    vi.spyOn(AuthService, 'isAuthenticated').mockReturnValue(true);
+    vi.spyOn(AuthService, 'getIdToken').mockResolvedValue('mock_token');
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'success' }),
+    } as unknown as Response);
+
+    const updated = await adapter.updateExpensesBatch([
+      { id: exp1.expenseId, updates: { category: 'Miscellaneous', name: 'Gifts' } },
+      { id: exp2.expenseId, updates: { category: 'Miscellaneous', name: 'Gifts' } },
+    ]);
+
+    expect(updated.length).toBe(2);
+    expect(updated[0].category).toBe('Miscellaneous');
+    expect(updated[0].name).toBe('Gifts');
+    expect(updated[1].category).toBe('Miscellaneous');
+    expect(updated[1].name).toBe('Gifts');
+
+    // flushPendingExpenses was called once for the batch
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/api/expenses/batch'),
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  it('does not overwrite newer local edits with stale remote snapshots during cloud sync', async () => {
+    // Local record already flushed (SYNCED) with a newer edit at 12:00, so the
+    // pending-ID guard cannot protect it; only the timestamp guard can.
+    const saved = await mockLocal.saveExpense({
+      date: '2026-09-05',
+      amount: 50,
+      categoryId: 'cat_misc_gifts',
+      categoryName: 'Miscellaneous - Gifts',
+      category: 'Miscellaneous',
+      name: 'Gifts',
+      enteredBy: 'Mike',
+      createdAt: '2026-09-05T10:00:00.000Z',
+      updatedAt: '2026-09-05T12:00:00.000Z',
+      syncStatus: 'SYNCED',
+    });
+
+    vi.spyOn(AuthService, 'isAuthenticated').mockReturnValue(true);
+    vi.spyOn(AuthService, 'getIdToken').mockResolvedValue('mock_token');
+
+    // Remote returns older snapshot from 10:00
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          expenseId: saved.expenseId,
+          date: '2026-09-05',
+          amount: 50,
+          categoryId: 'cat_phone',
+          categoryName: 'Home - Cell Phone',
+          enteredBy: 'Mike',
+          createdAt: '2026-09-05T10:00:00.000Z',
+          updatedAt: '2026-09-05T10:00:00.000Z',
+        },
+      ],
+    } as unknown as Response);
+
+    const expenses = await adapter.getExpenses(2026, 9);
+    expect(expenses.length).toBe(1);
+    // Should preserve newer local edit
+    expect(expenses[0].category).toBe('Miscellaneous');
+    expect(expenses[0].name).toBe('Gifts');
   });
 });
